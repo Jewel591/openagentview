@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -37,6 +38,17 @@ func main() {
 	if showVerion {
 		fmt.Println("openagentview " + version)
 		return
+	}
+
+	// Without tmux, -t can only ever draw an empty board, which reads as the
+	// product being broken rather than a dependency being absent. Saying so
+	// up front beats a board that stays silently blank forever.
+	if tmuxOnly {
+		if _, err := exec.LookPath("tmux"); err != nil {
+			fatal(errors.New(
+				"-t shows sessions running in tmux panes, but tmux is not installed",
+			))
+		}
 	}
 
 	codexAdapter, err := codex.New(codexHome)
