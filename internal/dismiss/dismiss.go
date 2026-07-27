@@ -46,18 +46,11 @@ func Open() (*Store, error) {
 // store; an unreadable or unparseable one is an error, because the next save
 // would write over whatever the file still says.
 func OpenAt(path string) (*Store, error) {
-	store := &Store{path: path, entries: map[string]time.Time{}}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return store, nil
-	}
+	entries, err := readEntries(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(data, &store.entries); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	return store, nil
+	return &Store{path: path, entries: entries}, nil
 }
 
 // Dismissed reports whether a session has been dismissed.
@@ -66,44 +59,113 @@ func (s *Store) Dismissed(agentName, sessionID string) bool {
 	return ok
 }
 
-// Dismiss records a session as dismissed and persists the change.
+// Dismiss records a session as dismissed and persists the change. The store
+// only remembers what was actually written: a dismissal that could not be
+// saved is not held in memory either, so what the board shows never disagrees
+// with what the next start will read back.
 func (s *Store) Dismiss(agentName, sessionID string) error {
-	s.entries[Key(agentName, sessionID)] = time.Now().UTC()
-	return s.save()
+	next := make(map[string]time.Time, len(s.entries)+1)
+	for key, dismissedAt := range s.entries {
+		next[key] = dismissedAt
+	}
+	next[Key(agentName, sessionID)] = time.Now().UTC()
+	merged, err := s.persist(next, nil)
+	if err != nil {
+		return err
+	}
+	s.entries = merged
+	return nil
 }
 
 // Prune drops the entries of sessions that are gone, keyed by Key, so the
 // file never outgrows the sessions that exist. An absent session must also
 // have been dismissed since before the cutoff: discovery can hide a session
-// without it being gone — a filtered run, an agent that failed to answer —
+// without it being gone — an agent that failed to answer, a filtered run —
 // and an entry dropped on such a run would put the session back on the board.
 func (s *Store) Prune(present map[string]bool, cutoff time.Time) error {
-	changed := false
+	pruned := map[string]bool{}
+	next := make(map[string]time.Time, len(s.entries))
 	for key, dismissedAt := range s.entries {
 		if !present[key] && dismissedAt.Before(cutoff) {
-			delete(s.entries, key)
-			changed = true
+			pruned[key] = true
+			continue
 		}
+		next[key] = dismissedAt
 	}
-	if !changed {
+	if len(pruned) == 0 {
 		return nil
 	}
-	return s.save()
-}
-
-func (s *Store) save() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(s.entries, "", "  ")
+	merged, err := s.persist(next, pruned)
 	if err != nil {
 		return err
 	}
-	// Written beside the file and renamed over it, so a crash mid-write
-	// cannot leave a half-written store behind.
-	temp := s.path + ".tmp"
-	if err := os.WriteFile(temp, data, 0o644); err != nil {
-		return err
+	s.entries = merged
+	return nil
+}
+
+// persist writes the entries out and returns what was written. The file is
+// re-read and merged first, because another instance of the board may have
+// saved dismissals since this one loaded: every board watching its own
+// project directory is ordinary use, and a plain rewrite would throw away
+// whatever the others recorded. Keys this call deliberately pruned are the
+// one thing not merged back.
+func (s *Store) persist(
+	entries map[string]time.Time,
+	pruned map[string]bool,
+) (map[string]time.Time, error) {
+	onDisk, err := readEntries(s.path)
+	if err != nil {
+		return nil, err
 	}
-	return os.Rename(temp, s.path)
+	for key, dismissedAt := range onDisk {
+		if pruned[key] {
+			continue
+		}
+		if current, ok := entries[key]; !ok || dismissedAt.After(current) {
+			entries[key] = dismissedAt
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return nil, err
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	// Written beside the file under a unique name and renamed over it, so a
+	// crash mid-write cannot leave a half-written store, and two instances
+	// saving at once cannot hand each other a half-written temp file.
+	temp, err := os.CreateTemp(filepath.Dir(s.path), ".dismissed-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		os.Remove(temp.Name())
+		return nil, err
+	}
+	if err := temp.Close(); err != nil {
+		os.Remove(temp.Name())
+		return nil, err
+	}
+	if err := os.Rename(temp.Name(), s.path); err != nil {
+		os.Remove(temp.Name())
+		return nil, err
+	}
+	return entries, nil
+}
+
+func readEntries(path string) (map[string]time.Time, error) {
+	entries := map[string]time.Time{}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return entries, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return entries, nil
 }

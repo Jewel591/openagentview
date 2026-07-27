@@ -74,3 +74,45 @@ func TestPruneOnlyDropsSessionsBothGoneAndPastTheCutoff(t *testing.T) {
 		t.Fatal("pruning kept a session both gone and past the cutoff")
 	}
 }
+
+func TestFailedSaveKeepsTheStoreUnchanged(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := storeAt(t, filepath.Join(dir, "dismissed.json"))
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+
+	if err := store.Dismiss("codex", "abc"); err == nil {
+		t.Fatal("dismissing into a read-only directory reported success")
+	}
+	if store.Dismissed("codex", "abc") {
+		t.Fatal("a dismissal that was never written is still shown as dismissed")
+	}
+}
+
+func TestStoresSharingTheFileMergeInsteadOfOverwriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dismissed.json")
+	first := storeAt(t, path)
+	second := storeAt(t, path)
+
+	if err := first.Dismiss("codex", "from-first"); err != nil {
+		t.Fatalf("Dismiss: %v", err)
+	}
+	if err := second.Dismiss("codex", "from-second"); err != nil {
+		t.Fatalf("Dismiss: %v", err)
+	}
+
+	if !second.Dismissed("codex", "from-first") {
+		t.Fatal("saving merged nothing: the second store lost the first's dismissal")
+	}
+	reopened := storeAt(t, path)
+	for _, id := range []string{"from-first", "from-second"} {
+		if !reopened.Dismissed("codex", id) {
+			t.Fatalf("the file lost %q to a concurrent instance's save", id)
+		}
+	}
+}

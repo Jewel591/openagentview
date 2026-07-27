@@ -201,6 +201,10 @@ type Model struct {
 	// its state file could not be read — the board still works, and ctrl+x
 	// says what is wrong instead of writing over the file.
 	dismissals *dismiss.Store
+	// pruneDismissed is false when discovery is filtered (-t): a board that
+	// only sees sessions in tmux panes cannot prove any other session gone,
+	// and pruning on such evidence would put dismissed sessions back.
+	pruneDismissed bool
 	// pendingDismissID is the session one ctrl+x has armed for dismissal, and
 	// pendingDismissAt when, so the confirming press can be held to the same
 	// session and a short window.
@@ -308,21 +312,23 @@ func New(
 	starter SessionStarter,
 	launchers []Launcher,
 	dismissals *dismiss.Store,
+	pruneDismissed bool,
 ) *Model {
 	workdir, err := os.Getwd()
 	if err != nil {
 		workdir = ""
 	}
 	return &Model{
-		adapter:    adapter,
-		panes:      panes,
-		starter:    starter,
-		launchers:  launchers,
-		dismissals: dismissals,
-		workdir:    workdir,
-		loading:    true,
-		width:      120,
-		height:     36,
+		adapter:        adapter,
+		panes:          panes,
+		starter:        starter,
+		launchers:      launchers,
+		dismissals:     dismissals,
+		pruneDismissed: pruneDismissed,
+		workdir:        workdir,
+		loading:        true,
+		width:          120,
+		height:         36,
 	}
 }
 
@@ -388,7 +394,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Dismissals of sessions that no longer exist are pruned here, against
 		// a full answer only: a partial one is missing a whole agent's
 		// sessions, not evidence that they are gone.
-		if msg.err == nil && m.dismissals != nil {
+		if msg.err == nil && m.dismissals != nil && m.pruneDismissed {
 			present := make(map[string]bool, len(msg.sessions))
 			for _, session := range msg.sessions {
 				present[dismiss.Key(session.Agent, session.ID)] = true
@@ -2116,40 +2122,42 @@ func (m *Model) renderComposer() string {
 	if !m.canCompose() {
 		return ""
 	}
+	// The agent the task will go to leads the line: which agent answers is
+	// the first fact about the session being described, and at the far right
+	// of a wide terminal it was read last or not at all. Brackets make it a
+	// selector rather than stray text; ⇥ says tab switches it.
 	agentTag := m.launchers[m.composeAgent].Agent
 	if len(m.launchers) > 1 {
 		agentTag += " ⇥"
 	}
-	right := mutedStyle.Render(agentTag)
+	tagStyle := mutedStyle
 	if m.composing {
-		right = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#C4B5FD")).
-			Render(agentTag)
+		tagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4B5FD"))
 	}
+	tag := tagStyle.Render("["+agentTag+"]") + " "
 
 	prompt := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#A78BFA")).
 		Render("❯ ")
-	available := max(1, m.width-2-lipgloss.Width(right)-2)
+	available := max(1, m.width-2-lipgloss.Width(tag)-2)
 	var line string
 	if m.composing {
 		text := tailCells(m.composeText, available-1)
-		line = prompt + lipgloss.NewStyle().
+		line = tag + prompt + lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#F8FAFC")).
 			Render(text) + "█"
 	} else {
-		line = prompt + mutedStyle.Render(truncate(
+		line = tag + prompt + mutedStyle.Render(truncate(
 			"describe a task for a new session · press n",
 			available,
 		))
 	}
-	gap := max(1, m.width-lipgloss.Width(line)-lipgloss.Width(right)-1)
 	return lipgloss.NewStyle().
 		Width(m.width).
 		BorderTop(true).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("#334155")).
-		Render(truncate(line+strings.Repeat(" ", gap)+right, m.width))
+		Render(truncate(line, m.width))
 }
 
 // composerHeight is the input line and the rule above it, or nothing when

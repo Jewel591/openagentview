@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -2109,5 +2110,61 @@ func TestCtrlXWithoutAStoreOnlyReportsIt(t *testing.T) {
 	}
 	if !strings.Contains(m.status, "unavailable") {
 		t.Fatalf("the missing store was not reported: %q", m.status)
+	}
+}
+
+func TestOnlyAnUnfilteredBoardPrunesDismissals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dismissed.json")
+	stale := time.Now().Add(-2 * dismissRetention).UTC().Format(time.RFC3339)
+	entry := []byte(`{"codex/gone": ` + strconv.Quote(stale) + `}`)
+	if err := os.WriteFile(path, entry, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := dismiss.OpenAt(path)
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+	m := dismissModel(t)
+	m.dismissals = store
+
+	// A filtered (-t) board only sees sessions in tmux panes, so a refresh
+	// that no longer returns the session proves nothing about it.
+	m.pruneDismissed = false
+	m.Update(refreshMsg{sessions: m.sessions})
+	if !store.Dismissed("codex", "gone") {
+		t.Fatal("a filtered refresh pruned a dismissal it could not disprove")
+	}
+
+	m.pruneDismissed = true
+	m.Update(refreshMsg{sessions: m.sessions})
+	if store.Dismissed("codex", "gone") {
+		t.Fatal("a full refresh kept a dismissal whose session is long gone")
+	}
+}
+
+func TestFailedDismissLeavesTheSessionOnTheBoard(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := dismiss.OpenAt(filepath.Join(dir, "dismissed.json"))
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	m := dismissModel(t)
+	m.dismissals = store
+
+	press(t, m, ctrlX)
+	press(t, m, ctrlX)
+
+	if !strings.Contains(m.status, "failed") {
+		t.Fatalf("the failed save was not reported: %q", m.status)
+	}
+	if len(idleCards(m)) != 2 {
+		t.Fatal("a dismissal that was never saved still hid the session")
 	}
 }
