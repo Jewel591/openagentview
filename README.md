@@ -53,6 +53,8 @@ resume any session, or start a new one.
 - Codex CLI as `codex`, Claude Code as `claude`, Grok CLI as `grok`, or any
   subset of them
 - macOS or Linux for live process detection
+- tmux, optionally: without it the board still discovers, previews and
+  resumes sessions, but the composer, the pane mirror and `-t` need it
 
 Any agent may be absent. A missing agent is reported in the footer while the
 other agents' sessions keep working.
@@ -76,6 +78,11 @@ sessions running inside a tmux pane:
 ```sh
 ./bin/openagentview -t
 ```
+
+`-t` requires tmux to be installed and exits with an error when it is not,
+since a board of tmux sessions can only ever be empty without it. The tmux
+server itself may come and go: an empty `-t` board fills in as agents start
+inside tmux.
 
 To use non-default agent directories:
 
