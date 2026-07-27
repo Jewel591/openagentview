@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Jewel591/openagentview/internal/agent"
+	"github.com/Jewel591/openagentview/internal/dismiss"
 	"github.com/Jewel591/openagentview/internal/tmux"
 )
 
@@ -40,6 +41,16 @@ const (
 )
 
 const recentWindow = 24 * time.Hour
+
+// A dismissal is asked for twice: one ctrl+x arms it, a second ctrl+x on the
+// same session inside this window confirms it, and any other keystroke stands
+// it down. Two presses because there is no agent-side record to undo.
+const dismissConfirmWindow = 2 * time.Second
+
+// A dismissed session that discovery stops returning keeps its entry this
+// long before it is pruned, so the file stays bounded by the sessions that
+// exist without a briefly hidden session losing its dismissal.
+const dismissRetention = 30 * 24 * time.Hour
 
 const previewRefreshInterval = time.Second
 
@@ -186,6 +197,15 @@ type Model struct {
 	panes     PaneController
 	starter   SessionStarter
 	launchers []Launcher
+	// dismissals is the board's own record of sessions asked off it, nil when
+	// its state file could not be read — the board still works, and ctrl+x
+	// says what is wrong instead of writing over the file.
+	dismissals *dismiss.Store
+	// pendingDismissID is the session one ctrl+x has armed for dismissal, and
+	// pendingDismissAt when, so the confirming press can be held to the same
+	// session and a short window.
+	pendingDismissID string
+	pendingDismissAt time.Time
 	// workdir is where a composed session starts: the directory openagentview
 	// itself was launched from, resolved once rather than per task.
 	workdir string
@@ -287,20 +307,22 @@ func New(
 	panes PaneController,
 	starter SessionStarter,
 	launchers []Launcher,
+	dismissals *dismiss.Store,
 ) *Model {
 	workdir, err := os.Getwd()
 	if err != nil {
 		workdir = ""
 	}
 	return &Model{
-		adapter:   adapter,
-		panes:     panes,
-		starter:   starter,
-		launchers: launchers,
-		workdir:   workdir,
-		loading:   true,
-		width:     120,
-		height:    36,
+		adapter:    adapter,
+		panes:      panes,
+		starter:    starter,
+		launchers:  launchers,
+		dismissals: dismissals,
+		workdir:    workdir,
+		loading:    true,
+		width:      120,
+		height:     36,
 	}
 }
 
@@ -363,6 +385,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = msg.sessions
 		m.lastSync = time.Now()
 		m.restoreSelection(selectedID)
+		// Dismissals of sessions that no longer exist are pruned here, against
+		// a full answer only: a partial one is missing a whole agent's
+		// sessions, not evidence that they are gone.
+		if msg.err == nil && m.dismissals != nil {
+			present := make(map[string]bool, len(msg.sessions))
+			for _, session := range msg.sessions {
+				present[dismiss.Key(session.Agent, session.ID)] = true
+			}
+			cutoff := time.Now().Add(-dismissRetention)
+			if err := m.dismissals.Prune(present, cutoff); err != nil {
+				m.status = "Dismissal cleanup failed: " + err.Error()
+			}
+		}
 		return m, nil
 	case previewLoadedMsg:
 		if !m.previewOpen ||
@@ -633,6 +668,11 @@ func (m *Model) addClickZone(zone clickZone) {
 
 func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	stroke := key.Keystroke()
+	// Any keystroke other than the confirming ctrl+x stands a pending
+	// dismissal down: the second press must mean nothing but "yes".
+	if stroke != "ctrl+x" {
+		m.pendingDismissID = ""
+	}
 	if stroke == "ctrl+s" {
 		m.searching = false
 		m.composing = false
@@ -818,10 +858,42 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.refreshCmd()
 	case "a":
 		return m, m.archiveSelected()
+	case "ctrl+x":
+		m.dismissSelected()
 	case "enter":
 		return m, m.resumeSelected()
 	}
 	return m, nil
+}
+
+// dismissSelected takes the selected session off the board on the second
+// ctrl+x, remembered in the board's own state rather than the agent's. Unlike
+// archiving this works for every agent and every status: it changes what the
+// board shows, not what the agent has.
+func (m *Model) dismissSelected() {
+	selected := m.selected()
+	if selected == nil {
+		return
+	}
+	if m.dismissals == nil {
+		m.status = "Dismiss unavailable: the dismissal state file could not be read"
+		return
+	}
+	armed := m.pendingDismissID == selected.ID &&
+		time.Since(m.pendingDismissAt) <= dismissConfirmWindow
+	if !armed {
+		m.pendingDismissID = selected.ID
+		m.pendingDismissAt = time.Now()
+		m.status = "Press ctrl+x again to dismiss this session"
+		return
+	}
+	m.pendingDismissID = ""
+	if err := m.dismissals.Dismiss(selected.Agent, selected.ID); err != nil {
+		m.status = "Dismiss failed: " + err.Error()
+		return
+	}
+	m.status = "Session dismissed"
+	m.clampSelection()
 }
 
 func (m *Model) openQuickLook() tea.Cmd {
@@ -1461,6 +1533,11 @@ func (m *Model) cardsForColumn(index int) []agent.Session {
 }
 
 func (m *Model) sessionVisible(session agent.Session, query string) bool {
+	// A dismissed session is out of sight everywhere, search included, the
+	// same way an archived one is.
+	if m.dismissals != nil && m.dismissals.Dismissed(session.Agent, session.ID) {
+		return false
+	}
 	if query != "" {
 		return matches(session, query)
 	}
@@ -2141,14 +2218,14 @@ func (m *Model) renderShortcutHelp() string {
 			"enter open  ·  space preview  ·  d details  ·  / search",
 			"tmux preview types into the agent  ·  ctrl+space = space  ·  space closes",
 			"click selects  ·  click again previews  ·  shift/option+drag selects text",
-			"n new session  ·  a archive  ·  r refresh  ·  q quit  ·  ? close",
+			"n new session  ·  a archive  ·  ctrl+x ×2 dismiss  ·  r refresh  ·  q quit  ·  ? close",
 		}
 	} else {
 		lines = []string{
 			"tab group by status/projects     v kanban/list layout     ←/→ switch columns     ↑/↓ select session     enter open     space preview",
 			"a tmux preview types into the agent   ctrl+space types a space   space closes it   ctrl+] browses   t transcript   i type again",
 			"click selects a card   click again opens quick look   click outside closes it   shift/option+drag selects text",
-			"/ search      n new session      d details      a archive      r refresh     q quit     ? close",
+			"/ search      n new session      d details      a archive      ctrl+x twice dismiss      r refresh     q quit     ? close",
 		}
 	}
 	return lipgloss.NewStyle().

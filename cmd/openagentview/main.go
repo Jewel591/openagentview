@@ -11,6 +11,7 @@ import (
 	"github.com/Jewel591/openagentview/internal/agent"
 	"github.com/Jewel591/openagentview/internal/claude"
 	"github.com/Jewel591/openagentview/internal/codex"
+	"github.com/Jewel591/openagentview/internal/dismiss"
 	"github.com/Jewel591/openagentview/internal/grok"
 	"github.com/Jewel591/openagentview/internal/tmux"
 	"github.com/Jewel591/openagentview/internal/ui"
@@ -77,7 +78,12 @@ func main() {
 		}
 	}
 
-	program := tea.NewProgram(ui.New(panes, panes, panes, launchers))
+	// A board that cannot remember dismissals still works: the store stays
+	// nil, and ctrl+x reports the problem instead of writing over whatever
+	// the state file still says.
+	dismissals, _ := dismiss.Open()
+
+	program := tea.NewProgram(ui.New(panes, panes, panes, launchers, dismissals))
 	if _, err := program.Run(); err != nil {
 		fatal(err)
 	}
