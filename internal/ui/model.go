@@ -217,6 +217,11 @@ type Model struct {
 	composing    bool
 	composeText  string
 	composeAgent int
+	// composeDir is where the composed task will start, empty meaning the
+	// board's own working directory. It survives the composer being put down,
+	// the way the agent choice does: the next task usually goes where the
+	// last one went.
+	composeDir string
 
 	sessions           []agent.Session
 	group              boardGroup
@@ -721,6 +726,8 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.startComposedSession()
 		case "tab":
 			m.composeAgent = (m.composeAgent + 1) % len(m.launchers)
+		case "shift+tab":
+			m.cycleComposeDir()
 		case "backspace":
 			if len(m.composeText) > 0 {
 				_, size := utf8.DecodeLastRuneInString(m.composeText)
@@ -1298,6 +1305,60 @@ func (m *Model) canCompose() bool {
 	return m.starter != nil && len(m.launchers) > 0
 }
 
+// composeDirs is everywhere a composed task can start: the directory the
+// board was launched from, then every project a session already ran in,
+// freshest first. Like the Projects grouping, the list is derived from the
+// sessions on the board rather than configured — the places work happens are
+// already known, and a brand-new one is a cd away.
+func (m *Model) composeDirs() []string {
+	base := filepath.Clean(m.workdir)
+	latest := map[string]time.Time{}
+	for _, session := range m.sessions {
+		path := filepath.Clean(session.CWD)
+		if path == "." || path == base {
+			continue
+		}
+		if session.UpdatedAt.After(latest[path]) {
+			latest[path] = session.UpdatedAt
+		}
+	}
+	dirs := make([]string, 0, len(latest)+1)
+	dirs = append(dirs, base)
+	for path := range latest {
+		dirs = append(dirs, path)
+	}
+	sort.SliceStable(dirs[1:], func(i, j int) bool {
+		return latest[dirs[1+i]].After(latest[dirs[1+j]])
+	})
+	return dirs
+}
+
+// currentComposeDir is composeDirs' selection resolved to a path, falling
+// back to the board's own working directory when nothing was picked or the
+// picked project's sessions have since left the board.
+func (m *Model) currentComposeDir() string {
+	if m.composeDir != "" {
+		return m.composeDir
+	}
+	return m.workdir
+}
+
+func (m *Model) cycleComposeDir() {
+	dirs := m.composeDirs()
+	if len(dirs) < 2 {
+		return
+	}
+	current := filepath.Clean(m.currentComposeDir())
+	next := 0
+	for i, dir := range dirs {
+		if dir == current {
+			next = (i + 1) % len(dirs)
+			break
+		}
+	}
+	m.composeDir = dirs[next]
+}
+
 // startComposedSession starts the described task as a fresh agent in a tmux
 // session of its own. The board takes it from there: discovery finds the new
 // session, and Quick Look can mirror it like any other pane.
@@ -1316,7 +1377,7 @@ func (m *Model) startComposedSession() tea.Cmd {
 	command := append([]string{name}, args...)
 	sessionName := tmux.SessionName(prompt)
 	starter := m.starter
-	dir := m.workdir
+	dir := m.currentComposeDir()
 	agentName := launcher.Agent
 	m.composing = false
 	m.composeText = ""
@@ -2134,7 +2195,15 @@ func (m *Model) renderComposer() string {
 	if m.composing {
 		tagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4B5FD"))
 	}
-	tag := tagStyle.Render("["+agentTag+"]") + " "
+	// The directory rides next to the agent as the task's second address:
+	// who runs it, then where. Shown as the project's name, since the full
+	// path would crowd out the input it is only labelling.
+	dirTag := projectName(m.currentComposeDir())
+	if len(m.composeDirs()) > 1 {
+		dirTag += " ⇧⇥"
+	}
+	tag := tagStyle.Render("["+agentTag+"]") + " " +
+		tagStyle.Render("["+dirTag+"]") + " "
 
 	prompt := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#A78BFA")).
@@ -2192,7 +2261,8 @@ func (m *Model) renderFooter() string {
 	}
 	help := "enter open · space preview · tab group · v layout · ? shortcuts"
 	if m.composing {
-		help = "enter start the session · tab switch agent · esc put it down"
+		help = "enter start the session · tab switch agent" +
+			" · shift+tab switch directory · esc put it down"
 	}
 	right := ""
 	if m.loading {

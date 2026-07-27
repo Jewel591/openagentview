@@ -2168,3 +2168,77 @@ func TestFailedDismissLeavesTheSessionOnTheBoard(t *testing.T) {
 		t.Fatal("a dismissal that was never saved still hid the session")
 	}
 }
+
+func TestComposerCyclesDirectoriesAcrossProjects(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModel(starter)
+	now := time.Now()
+	m.sessions = []agent.Session{
+		{
+			ID:            "older",
+			Agent:         "codex",
+			CWD:           "/projects/alpha",
+			RuntimeStatus: agent.StatusIdle,
+			UpdatedAt:     now.Add(-time.Hour),
+			RecencyAt:     now.Add(-time.Hour),
+		},
+		{
+			ID:            "newer",
+			Agent:         "claude",
+			CWD:           "/projects/beta",
+			RuntimeStatus: agent.StatusIdle,
+			UpdatedAt:     now,
+			RecencyAt:     now,
+		},
+	}
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	shiftTab := tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
+
+	// The cycle leads with the board's own directory, then projects freshest
+	// first, and wraps.
+	press(t, m, shiftTab)
+	if m.currentComposeDir() != "/projects/beta" {
+		t.Fatalf("first shift+tab picked %q, want the freshest project", m.currentComposeDir())
+	}
+	press(t, m, shiftTab)
+	if m.currentComposeDir() != "/projects/alpha" {
+		t.Fatalf("second shift+tab picked %q, want the older project", m.currentComposeDir())
+	}
+	press(t, m, shiftTab)
+	if m.currentComposeDir() != "/projects/openagentview" {
+		t.Fatalf("third shift+tab picked %q, want to wrap to the board's directory", m.currentComposeDir())
+	}
+	press(t, m, shiftTab)
+
+	typeText(t, m, "task")
+	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if msg := cmd().(sessionStartedMsg); msg.err != nil {
+		t.Fatalf("starting in a picked directory failed: %v", msg.err)
+	}
+	if starter.dir != "/projects/beta" {
+		t.Fatalf("session started in %q, want the picked project", starter.dir)
+	}
+}
+
+func TestComposerDirSurvivesTheDraftBeingPutDown(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModel(starter)
+	m.sessions = []agent.Session{{
+		ID:            "one",
+		Agent:         "codex",
+		CWD:           "/projects/alpha",
+		RuntimeStatus: agent.StatusIdle,
+		UpdatedAt:     time.Now(),
+		RecencyAt:     time.Now(),
+	}}
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+
+	if m.currentComposeDir() != "/projects/alpha" {
+		t.Fatalf("reopening the composer forgot the picked directory: %q", m.currentComposeDir())
+	}
+}

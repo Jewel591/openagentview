@@ -112,9 +112,10 @@ openagentview --codex-home /path/to/.codex \
 | `q` | Quit |
 
 While the composer is focused, the keyboard belongs to it: `Enter` starts the
-session in the directory openagentview was launched from, `Tab` picks which
-agent runs it, and `Esc` puts the draft down without losing it. The composer
-appears only when tmux and at least one agent CLI are installed.
+session, `Tab` picks which agent runs it, `Shift+Tab` picks where — the
+directory openagentview was launched from, or any project that already has a
+session on the board — and `Esc` puts the draft down without losing it. The
+composer appears only when tmux and at least one agent CLI are installed.
 
 Quick Look on a session running in a tmux pane opens typing into that agent.
 The pane is mirrored at its own width, in a window over the board. Every key
