@@ -3,6 +3,8 @@ package ui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Jewel591/openagentview/internal/agent"
+	"github.com/Jewel591/openagentview/internal/dismiss"
 	"github.com/Jewel591/openagentview/internal/tmux"
 )
 
@@ -1978,5 +1981,190 @@ func TestCtrlKOpensSearchLikeSlash(t *testing.T) {
 	press(t, m, tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
 	if !m.searching {
 		t.Fatal("ctrl+k did not open the search input")
+	}
+}
+
+func dismissModel(t *testing.T) *Model {
+	t.Helper()
+	store, err := dismiss.OpenAt(filepath.Join(t.TempDir(), "dismissed.json"))
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+	now := time.Now()
+	m := &Model{
+		adapter:    &previewAdapter{},
+		dismissals: store,
+		width:      120,
+		height:     40,
+		group:      groupStatus,
+		sessions: []agent.Session{
+			{
+				ID:            "one",
+				Agent:         "codex",
+				Title:         "First session",
+				CWD:           "/projects/a",
+				RuntimeStatus: agent.StatusIdle,
+				UpdatedAt:     now,
+				RecencyAt:     now,
+			},
+			{
+				ID:            "two",
+				Agent:         "codex",
+				Title:         "Second session",
+				CWD:           "/projects/b",
+				RuntimeStatus: agent.StatusIdle,
+				UpdatedAt:     now.Add(-time.Minute),
+				RecencyAt:     now.Add(-time.Minute),
+			},
+		},
+	}
+	m.clampSelection()
+	return m
+}
+
+func idleCards(m *Model) []agent.Session {
+	for i, column := range m.columns() {
+		if column.status == agent.StatusIdle {
+			return m.cardsForColumn(i)
+		}
+	}
+	return nil
+}
+
+var ctrlX = tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl}
+
+func TestDismissTakesTwoCtrlXPresses(t *testing.T) {
+	m := dismissModel(t)
+
+	press(t, m, ctrlX)
+	if cards := idleCards(m); len(cards) != 2 {
+		t.Fatalf("one ctrl+x already changed the board: %d cards", len(cards))
+	}
+	if !strings.Contains(m.status, "again") {
+		t.Fatalf("arming did not ask for confirmation: %q", m.status)
+	}
+
+	press(t, m, ctrlX)
+	cards := idleCards(m)
+	if len(cards) != 1 || cards[0].ID != "two" {
+		t.Fatalf("the confirmed dismissal did not remove the session: %v", cards)
+	}
+	if !m.dismissals.Dismissed("codex", "one") {
+		t.Fatal("the dismissal was not recorded in the store")
+	}
+}
+
+func TestAnotherKeyStandsDownAPendingDismissal(t *testing.T) {
+	m := dismissModel(t)
+
+	press(t, m, ctrlX)
+	press(t, m, tea.KeyPressMsg{Code: 'v', Text: "v"})
+	press(t, m, ctrlX)
+
+	if m.dismissals.Dismissed("codex", "one") {
+		t.Fatal("ctrl+x confirmed a dismissal another key had stood down")
+	}
+	if !strings.Contains(m.status, "again") {
+		t.Fatalf("the third press did not re-arm: %q", m.status)
+	}
+}
+
+func TestAnExpiredArmRearmsInsteadOfDismissing(t *testing.T) {
+	m := dismissModel(t)
+
+	press(t, m, ctrlX)
+	m.pendingDismissAt = time.Now().Add(-2 * dismissConfirmWindow)
+	press(t, m, ctrlX)
+
+	if m.dismissals.Dismissed("codex", "one") {
+		t.Fatal("a ctrl+x outside the window confirmed the dismissal")
+	}
+	if len(idleCards(m)) != 2 {
+		t.Fatal("an expired arm still changed the board")
+	}
+}
+
+func TestDismissedSessionsAreHiddenFromSearchToo(t *testing.T) {
+	m := dismissModel(t)
+	if err := m.dismissals.Dismiss("codex", "one"); err != nil {
+		t.Fatalf("Dismiss: %v", err)
+	}
+
+	if m.sessionVisible(m.sessions[0], "first") {
+		t.Fatal("a search surfaced a dismissed session")
+	}
+	if !m.sessionVisible(m.sessions[1], "second") {
+		t.Fatal("hiding a dismissed session took an undismissed one with it")
+	}
+}
+
+func TestCtrlXWithoutAStoreOnlyReportsIt(t *testing.T) {
+	m := dismissModel(t)
+	m.dismissals = nil
+
+	press(t, m, ctrlX)
+	press(t, m, ctrlX)
+
+	if len(idleCards(m)) != 2 {
+		t.Fatal("ctrl+x changed the board without a store to remember it")
+	}
+	if !strings.Contains(m.status, "unavailable") {
+		t.Fatalf("the missing store was not reported: %q", m.status)
+	}
+}
+
+func TestOnlyAnUnfilteredBoardPrunesDismissals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dismissed.json")
+	stale := time.Now().Add(-2 * dismissRetention).UTC().Format(time.RFC3339)
+	entry := []byte(`{"codex/gone": ` + strconv.Quote(stale) + `}`)
+	if err := os.WriteFile(path, entry, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := dismiss.OpenAt(path)
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+	m := dismissModel(t)
+	m.dismissals = store
+
+	// A filtered (-t) board only sees sessions in tmux panes, so a refresh
+	// that no longer returns the session proves nothing about it.
+	m.pruneDismissed = false
+	m.Update(refreshMsg{sessions: m.sessions})
+	if !store.Dismissed("codex", "gone") {
+		t.Fatal("a filtered refresh pruned a dismissal it could not disprove")
+	}
+
+	m.pruneDismissed = true
+	m.Update(refreshMsg{sessions: m.sessions})
+	if store.Dismissed("codex", "gone") {
+		t.Fatal("a full refresh kept a dismissal whose session is long gone")
+	}
+}
+
+func TestFailedDismissLeavesTheSessionOnTheBoard(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := dismiss.OpenAt(filepath.Join(dir, "dismissed.json"))
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	m := dismissModel(t)
+	m.dismissals = store
+
+	press(t, m, ctrlX)
+	press(t, m, ctrlX)
+
+	if !strings.Contains(m.status, "failed") {
+		t.Fatalf("the failed save was not reported: %q", m.status)
+	}
+	if len(idleCards(m)) != 2 {
+		t.Fatal("a dismissal that was never saved still hid the session")
 	}
 }

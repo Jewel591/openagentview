@@ -43,6 +43,8 @@ resume any session, or start a new one.
   detached tmux session of its own, which discovery then picks up like any
   other
 - Archives idle Codex sessions through the Codex CLI
+- Dismisses any session from the board with ctrl+x pressed twice, remembered
+  in openagentview's own state file without touching the agent's store
 - Refreshes automatically without writing to any agent's private state
 
 ## Requirements
