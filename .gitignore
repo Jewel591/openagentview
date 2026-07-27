@@ -1,0 +1,24 @@
+# Build artifacts
+/bin/
+/dist/
+/openagentview
+*.out
+coverage.txt
+
+# OS
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+
+# Personal AI-agent and editor state — never commit these
+CLAUDE.md
+CLAUDE.local.md
+/.claude/
+.mcp.json
+/.codex/
+/.grok/
+/.cursor/
+/.vscode/
+/.idea/

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l cmd internal)
+          if [ -n "$out" ]; then
+            echo "gofmt needed on:"; echo "$out"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      # -short skips the tests that drive a real tmux server; those run
+      # locally before every change lands. CI stays deterministic.
+      - name: go test
+        run: go test -short ./...
+      - name: go build
+        run: go build ./cmd/openagentview
