@@ -27,8 +27,13 @@ Run these before handing off a change:
 gofmt -w cmd internal
 go test ./...
 go vet ./...
-go build ./cmd/openagentview
+go build -o bin/openagentview ./cmd/openagentview
 ```
+
+Build to `bin/openagentview`, the path README tells people to run: a build left
+anywhere else leaves the binary they launch untouched, and the change looks
+like it never happened. A board already on screen is an older binary still
+running — quit it and start it again to see the change.
 
 Tests should cover state transitions and adapter parsing behavior. Do not add
 snapshot tests for terminal styling.

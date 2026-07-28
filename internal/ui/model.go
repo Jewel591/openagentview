@@ -99,6 +99,7 @@ const (
 	clickLayoutKanban
 	clickLayoutList
 	clickSearch
+	clickAgentChip
 	clickComposer
 	clickCard
 	clickColumnTab
@@ -110,7 +111,8 @@ type clickZone struct {
 	rect   screenRect
 	action clickAction
 	// column and row name the card a clickCard zone stands for, and column
-	// alone the tab a clickColumnTab zone stands for.
+	// alone the tab a clickColumnTab zone stands for or the place in the
+	// header run a clickAgentChip zone stands for.
 	column int
 	row    int
 }
@@ -235,15 +237,20 @@ type Model struct {
 	// menu back, since new text is a new question.
 	composeMenuHidden bool
 
-	sessions           []agent.Session
-	group              boardGroup
-	layout             boardLayout
-	column             int
-	row                int
-	width              int
-	height             int
-	query              string
-	searching          bool
+	sessions  []agent.Session
+	group     boardGroup
+	layout    boardLayout
+	column    int
+	row       int
+	width     int
+	height    int
+	query     string
+	searching bool
+	// agentFilter is the set of agents the board is narrowed to, empty
+	// meaning every agent. Each header chip toggles its own entry, so the
+	// filter reads as "these agents" rather than a single choice cycled
+	// through — two agents at once is a question the board is asked often.
+	agentFilter        map[string]bool
 	detail             bool
 	helpOpen           bool
 	previewOpen        bool
@@ -801,6 +808,8 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m, m.startAnimIfNeeded()
 	case clickSearch:
 		m.searching = true
+	case clickAgentChip:
+		m.toggleAgentAt(zone.column)
 	case clickComposer:
 		if m.canCompose() {
 			m.composing = true
@@ -1026,7 +1035,11 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch stroke {
-	case "ctrl+c", "q":
+	case "ctrl+c", "ctrl+q", "q":
+		// The two modified strokes are not spare spellings of q: an input
+		// method that composes text out of the letter keys swallows q whole,
+		// and switching it off to leave the board is a step no one should
+		// have to take. ctrl is never composed, so it always reaches here.
 		return m, tea.Quit
 	case "tab":
 		m.toggleGroup()
@@ -1039,6 +1052,13 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// ctrl+k is the terminal's reach for the cmd+k every command palette
 		// taught; cmd itself never gets past the terminal emulator.
 		m.searching = true
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		// The digits toggle the header's chips in the order they are drawn,
+		// so the keyboard reaches the same independent switches the mouse
+		// does, rather than a cycle that could only ever pick one agent.
+		m.toggleAgentAt(int(stroke[0] - '1'))
+	case "a":
+		m.clearAgentFilter()
 	case "n":
 		if m.canCompose() {
 			m.composing = true
@@ -1411,6 +1431,63 @@ func errorText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// agentNames is the run of agents the header offers chips for: the ones
+// discovery actually found, plus any the filter still names so a chip never
+// disappears out from under the selection that would clear it.
+func (m *Model) agentNames() []string {
+	seen := map[string]bool{}
+	for _, session := range m.sessions {
+		if name := strings.ToLower(session.Agent); name != "" {
+			seen[name] = true
+		}
+	}
+	for name := range m.agentFilter {
+		seen[name] = true
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// toggleAgentFilter turns one agent's chip on or off. Emptying the set is the
+// same as never having filtered: the board goes back to every agent.
+func (m *Model) toggleAgentFilter(name string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return
+	}
+	if m.agentFilter[name] {
+		delete(m.agentFilter, name)
+	} else {
+		if m.agentFilter == nil {
+			m.agentFilter = map[string]bool{}
+		}
+		m.agentFilter[name] = true
+	}
+	m.clampSelection()
+}
+
+// toggleAgentAt names the chip a key or a click aimed at by its place in the
+// header, out of range being a key pressed at a chip that is not there.
+func (m *Model) toggleAgentAt(index int) {
+	names := m.agentNames()
+	if index < 0 || index >= len(names) {
+		return
+	}
+	m.toggleAgentFilter(names[index])
+}
+
+func (m *Model) clearAgentFilter() {
+	if len(m.agentFilter) == 0 {
+		return
+	}
+	m.agentFilter = nil
+	m.clampSelection()
 }
 
 func (m *Model) toggleGroup() {
@@ -2099,6 +2176,11 @@ func (m *Model) sessionVisible(session agent.Session, query string) bool {
 	if m.dismissals != nil && m.dismissals.Dismissed(session.Agent, session.ID) {
 		return false
 	}
+	// The agent filter is an axis of its own: it narrows what a search
+	// searches rather than being overridden by one.
+	if len(m.agentFilter) > 0 && !m.agentFilter[strings.ToLower(session.Agent)] {
+		return false
+	}
 	if query != "" {
 		return matches(session, query)
 	}
@@ -2283,12 +2365,27 @@ func (m *Model) renderHeader() string {
 		})
 		x += tab.width + tab.gap
 	}
-	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(search)-2)
-	line := left + strings.Repeat(" ", gap) + search
+	chips, chipWidths := m.renderAgentChips()
+	right := search
+	if chips != "" {
+		right = chips + mutedStyle.Render("  ·  ") + search
+	}
+	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(right)-2)
+	line := left + strings.Repeat(" ", gap) + right
+	// The chips' zones walk their own run of segments, the way the tabs' do.
+	x = lipgloss.Width(left) + gap
+	for i, width := range chipWidths {
+		m.addClickZone(clickZone{
+			rect:   screenRect{x: x, y: 0, width: width, height: 1},
+			action: clickAgentChip,
+			column: i,
+		})
+		x += width + 1
+	}
 	if !m.searching {
 		m.addClickZone(clickZone{
 			rect: screenRect{
-				x:      lipgloss.Width(left) + gap,
+				x:      lipgloss.Width(left) + lipgloss.Width(right) + gap - lipgloss.Width(search),
 				y:      0,
 				width:  lipgloss.Width(search),
 				height: 1,
@@ -2305,6 +2402,34 @@ func (m *Model) renderHeader() string {
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("#334155")).
 		Render(truncate(line, m.width))
+}
+
+// renderAgentChips draws one chip per agent in the same lit/unlit shape the
+// Status and Kanban tabs use, since a chip asks the same kind of question of
+// the board. Unlike those tabs, any number of chips can be lit at once, and
+// none lit means every agent — the board's resting state is unfiltered, so
+// nothing has to be selected to see everything. It returns the joined run and
+// each chip's width, which the header needs to place their click zones.
+func (m *Model) renderAgentChips() (string, []int) {
+	names := m.agentNames()
+	// A single agent has nothing to be filtered from, and a chip that can
+	// only ever hide the whole board is worth less than the width it costs.
+	if len(names) < 2 {
+		return "", nil
+	}
+	chips := make([]string, 0, len(names))
+	widths := make([]int, 0, len(names))
+	for _, name := range names {
+		label := strings.ToUpper(name)
+		style := tabStyle
+		if m.agentFilter[name] {
+			style = activeTabStyle
+		}
+		chip := style.Render(label)
+		chips = append(chips, chip)
+		widths = append(widths, lipgloss.Width(chip))
+	}
+	return strings.Join(chips, " "), widths
 }
 
 func (m *Model) renderBoard() string {
@@ -3131,7 +3256,8 @@ func (m *Model) footerHeight() int {
 // hints — and a wall of every binding reads as none of them.
 func (m *Model) shortcutHelpLines() []string {
 	const wide = "↑↓←→ move · enter quick look · ctrl+enter open in a tab" +
-		" · n new task · / search · ctrl+x ×2 dismiss · q quit"
+		" · n new task · / search · 1-9 filter agent · a all agents" +
+		" · ctrl+x ×2 dismiss · q / ctrl+q quit"
 	// One padding column on the left, and one spare on the right so the
 	// line never kisses the terminal's edge.
 	if lipgloss.Width(wide) <= m.width-2 {
@@ -3139,7 +3265,8 @@ func (m *Model) shortcutHelpLines() []string {
 	}
 	return []string{
 		"↑↓←→ move · enter quick look · ctrl+enter open in a tab",
-		"n new task · / search · ctrl+x ×2 dismiss · q quit",
+		"n new task · / search · 1-9 filter agent · a all agents" +
+			" · ctrl+x ×2 dismiss · q / ctrl+q quit",
 	}
 }
 

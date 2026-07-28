@@ -2946,3 +2946,129 @@ func TestBoardWaitsForTheFirstScanBeforeSayingItIsEmpty(t *testing.T) {
 		t.Fatalf("board = %q, want the pre-scan state", board)
 	}
 }
+
+// agentFilterModel is three idle sessions, one per agent, all recent enough
+// that only the agent filter can take any of them off the board.
+func agentFilterModel() *Model {
+	now := time.Now()
+	return &Model{
+		group:  groupStatus,
+		width:  160,
+		height: 40,
+		sessions: []agent.Session{
+			{ID: "c1", Agent: "claude", Title: "task alpha", RuntimeStatus: agent.StatusIdle, RecencyAt: now},
+			{ID: "x1", Agent: "codex", Title: "task beta", RuntimeStatus: agent.StatusIdle, RecencyAt: now},
+			{ID: "g1", Agent: "grok", Title: "task gamma", RuntimeStatus: agent.StatusIdle, RecencyAt: now},
+		},
+	}
+}
+
+func idleIDs(m *Model) []string {
+	ids := []string{}
+	for _, session := range m.cardsForColumn(2) {
+		ids = append(ids, session.ID)
+	}
+	return ids
+}
+
+func TestNoAgentChipSelectedShowsEveryAgent(t *testing.T) {
+	m := agentFilterModel()
+	if got := idleIDs(m); len(got) != 3 {
+		t.Fatalf("unfiltered board = %v, want all three sessions", got)
+	}
+}
+
+func TestAgentChipsToggleIndependently(t *testing.T) {
+	m := agentFilterModel()
+
+	// Chips are drawn in a stable order, so the first is claude.
+	m.toggleAgentAt(0)
+	if got := idleIDs(m); len(got) != 1 || got[0] != "c1" {
+		t.Fatalf("claude filter = %v, want only the claude session", got)
+	}
+
+	// A second chip widens the filter rather than replacing the first.
+	m.toggleAgentAt(2)
+	got := idleIDs(m)
+	if len(got) != 2 || got[0] != "c1" || got[1] != "g1" {
+		t.Fatalf("claude+grok filter = %v, want both sessions", got)
+	}
+
+	// Turning the last lit chip off is the same as never having filtered.
+	m.toggleAgentAt(0)
+	m.toggleAgentAt(2)
+	if got := idleIDs(m); len(got) != 3 {
+		t.Fatalf("emptied filter = %v, want all three sessions", got)
+	}
+}
+
+func TestAgentFilterNarrowsSearchRatherThanBeingOverriddenByIt(t *testing.T) {
+	m := agentFilterModel()
+	m.toggleAgentFilter("codex")
+	m.query = "task"
+	if got := idleIDs(m); len(got) != 1 || got[0] != "x1" {
+		t.Fatalf("filtered search = %v, want only the codex session", got)
+	}
+}
+
+func TestDigitTogglesAnAgentChipAndClearsWithA(t *testing.T) {
+	m := agentFilterModel()
+	m.clampSelection()
+
+	press(t, m, tea.KeyPressMsg{Code: '2', Text: "2"})
+	if got := idleIDs(m); len(got) != 1 || got[0] != "x1" {
+		t.Fatalf("after 2 = %v, want only the codex session", got)
+	}
+
+	press(t, m, tea.KeyPressMsg{Code: 'a', Text: "a"})
+	if got := idleIDs(m); len(got) != 3 {
+		t.Fatalf("after a = %v, want all three sessions", got)
+	}
+}
+
+// A digit past the end of the chip run is a key pressed at a chip that is not
+// there, which must not blank the board.
+func TestDigitPastTheLastAgentChipChangesNothing(t *testing.T) {
+	m := agentFilterModel()
+	m.toggleAgentAt(7)
+	if got := idleIDs(m); len(got) != 3 {
+		t.Fatalf("out-of-range chip = %v, want all three sessions", got)
+	}
+}
+
+// A chip stays drawn while it is lit, even once its agent's last session
+// leaves the board — otherwise the only switch that could clear the filter
+// would vanish with it.
+func TestALitAgentChipSurvivesItsAgentLeavingTheBoard(t *testing.T) {
+	m := agentFilterModel()
+	m.toggleAgentFilter("grok")
+	m.sessions = m.sessions[:2]
+	names := m.agentNames()
+	if len(names) != 3 || names[2] != "grok" {
+		t.Fatalf("agent chips = %v, want grok kept", names)
+	}
+}
+
+func TestASingleAgentGetsNoChips(t *testing.T) {
+	m := agentFilterModel()
+	m.sessions = m.sessions[:1]
+	if chips, widths := m.renderAgentChips(); chips != "" || widths != nil {
+		t.Fatalf("chips with one agent = %q/%v, want none", chips, widths)
+	}
+}
+
+// An input method that composes text out of the letter keys eats q, so the
+// board has to be leavable without switching it off.
+func TestCtrlQQuitsTheBoard(t *testing.T) {
+	for _, key := range []tea.KeyPressMsg{
+		{Code: 'q', Text: "q"},
+		{Code: 'q', Mod: tea.ModCtrl},
+		{Code: 'c', Mod: tea.ModCtrl},
+	} {
+		m := agentFilterModel()
+		m.clampSelection()
+		if cmd := press(t, m, key); cmd == nil {
+			t.Fatalf("%v returned no command, want quit", key)
+		}
+	}
+}
