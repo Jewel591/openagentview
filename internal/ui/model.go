@@ -607,18 +607,14 @@ func singleLine(text string) string {
 // per notch is what scrolling feels like everywhere else on the desktop.
 const wheelScrollLines = 3
 
-// handleWheel scrolls the Quick Look body, and walks the selection on the
-// board. The board's half exists because capturing the mouse for clicks took
-// the wheel away from the terminal, which used to turn it into the arrow keys
-// this reproduces. In Quick Look the wheel never reaches the mirrored agent:
-// pointing a wheel at a transcript is always a request to read it, even
-// mid-typing, whereas the arrow keys it would otherwise become walk an
-// agent's input history.
+// handleWheel scrolls the Quick Look body, the one thing on screen that
+// actually scrolls. On the board it does nothing: the board is one screen,
+// and a trackpad's inertia fires dozens of wheel events per flick — mapped
+// to the selection, a stray swipe sent it flying, so keys and clicks select.
+// In Quick Look the wheel never reaches the mirrored agent: pointing a wheel
+// at a transcript is always a request to read it, even mid-typing, whereas
+// the arrow keys it would otherwise become walk an agent's input history.
 func (m *Model) handleWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
-	// The wheel only moves what actually scrolls, which is Quick Look's
-	// body. On the board it does nothing: the board is one screen, and a
-	// trackpad's inertia fires dozens of wheel events per flick — mapped to
-	// the selection, a stray swipe sent it flying. Keys and clicks select.
 	if !m.previewOpen {
 		return m, nil
 	}
