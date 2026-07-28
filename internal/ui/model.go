@@ -319,9 +319,15 @@ type PaneController interface {
 }
 
 // SessionStarter is the part of tmux the composer needs: somewhere for a fresh
-// agent to run that the board can then discover, mirror and type into.
+// agent to run that the board can then discover, mirror and type into. Width
+// and height size the detached session's pane; zero leaves the size to tmux.
 type SessionStarter interface {
-	NewSession(ctx context.Context, name, dir string, command []string) (string, error)
+	NewSession(
+		ctx context.Context,
+		name, dir string,
+		command []string,
+		width, height int,
+	) (string, error)
 }
 
 // Launcher is one agent the composer can hand a task to: the name it carries
@@ -1688,6 +1694,20 @@ func (m *Model) completeComposeMention(entries []string) {
 	m.composeTextEdited()
 }
 
+// composedPaneSize is the size a composed session is created at. tmux gives a
+// detached session 80×24 unless told otherwise, which mirrored as a small
+// window adrift in a mostly empty overlay. Until a client attaches, the
+// mirror is the pane's only viewer, so the pane is cut to the largest screen
+// the roomy floating frame shows whole — the first real attach brings its own
+// size and tmux resizes the window to that client.
+func (m *Model) composedPaneSize() (width, height int) {
+	width = max(80, m.width-roomyPaneFrame.chrome-2*roomyPaneFrame.margin)
+	// Vertical margins plus the eight rows quickLookBodyHeight spends on the
+	// floating window's border, header, rules and footer.
+	height = max(24, m.height-2*paneWindowVMargin-8)
+	return width, height
+}
+
 // startComposedSession starts the described task as a fresh agent in a tmux
 // session of its own. The board takes it from there: discovery finds the new
 // session, and Quick Look can mirror it like any other pane.
@@ -1708,13 +1728,16 @@ func (m *Model) startComposedSession() tea.Cmd {
 	starter := m.starter
 	dir := m.currentComposeDir()
 	agentName := launcher.Agent
+	width, height := m.composedPaneSize()
 	m.composing = false
 	m.composeText = ""
 	m.status = "Starting " + agentName + "…"
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		created, err := starter.NewSession(ctx, sessionName, dir, command)
+		created, err := starter.NewSession(
+			ctx, sessionName, dir, command, width, height,
+		)
 		return sessionStartedMsg{
 			agent:  agentName,
 			name:   created,
@@ -3205,6 +3228,15 @@ func (f paneWindowFrame) floats() bool { return f.chrome > 0 }
 // on each side.
 const paneWindowChrome = 6
 
+// roomyPaneFrame is the frame a mirror gets whenever the pane leaves room for
+// it — and therefore also the frame a pane the product sizes itself should be
+// sized for.
+var roomyPaneFrame = paneWindowFrame{
+	chrome:  paneWindowChrome,
+	padding: 2,
+	margin:  2,
+}
+
 // paneFrame picks how much frame the mirror can afford. A captured screen
 // cannot be rewrapped, so a frame is always paid for out of the agent's own
 // columns — but a pane that fills the terminal is the common case rather than
@@ -3213,7 +3245,7 @@ const paneWindowChrome = 6
 // of the screen it shows. Hence a second, tighter frame instead of giving up:
 // a border, no padding, and the two columns it costs reported in the subtitle.
 func (m *Model) paneFrame() paneWindowFrame {
-	roomy := paneWindowFrame{chrome: paneWindowChrome, padding: 2, margin: 2}
+	roomy := roomyPaneFrame
 	if !m.paneView {
 		return roomy
 	}

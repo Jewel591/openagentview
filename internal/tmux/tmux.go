@@ -270,10 +270,14 @@ const sessionNameAttempts = 10
 // a taken name gets a numbered suffix, because two tasks described the same
 // way are still two tasks — and when every suffix is taken too, tmux's own
 // numbering names the session rather than the name refusing the task.
+// A positive width and height size the detached session — tmux falls back to
+// 80×24 otherwise, and the size only governs the session until a client
+// attaches and brings a real size along; zero leaves the sizing to tmux.
 func (c *Client) NewSession(
 	ctx context.Context,
 	name, dir string,
 	command []string,
+	width, height int,
 ) (string, error) {
 	if len(command) == 0 {
 		return "", errors.New("tmux: no command")
@@ -284,7 +288,7 @@ func (c *Client) NewSession(
 		if attempt > 1 {
 			candidate = name + "-" + strconv.Itoa(attempt)
 		}
-		created, err := c.startSession(ctx, candidate, dir, command)
+		created, err := c.startSession(ctx, candidate, dir, command, width, height)
 		if err == nil {
 			return created, nil
 		}
@@ -292,7 +296,7 @@ func (c *Client) NewSession(
 			return "", err
 		}
 	}
-	return c.startSession(ctx, "", dir, command)
+	return c.startSession(ctx, "", dir, command, width, height)
 }
 
 // startSession is one new-session attempt. An empty name leaves the naming to
@@ -301,6 +305,7 @@ func (c *Client) startSession(
 	ctx context.Context,
 	name, dir string,
 	command []string,
+	width, height int,
 ) (string, error) {
 	args := []string{"new-session", "-d", "-P", "-F", "#{session_name}"}
 	if name != "" {
@@ -308,6 +313,12 @@ func (c *Client) startSession(
 	}
 	if dir != "" {
 		args = append(args, "-c", dir)
+	}
+	if width > 0 && height > 0 {
+		args = append(args,
+			"-x", strconv.Itoa(width),
+			"-y", strconv.Itoa(height),
+		)
 	}
 	// The command goes through as one shell word: handed over as several,
 	// older tmux joins them with spaces and a prompt argument dissolves into

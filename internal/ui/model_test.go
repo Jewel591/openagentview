@@ -1585,6 +1585,8 @@ type fakeStarter struct {
 	name    string
 	dir     string
 	command []string
+	width   int
+	height  int
 	err     error
 }
 
@@ -1592,8 +1594,10 @@ func (s *fakeStarter) NewSession(
 	_ context.Context,
 	name, dir string,
 	command []string,
+	width, height int,
 ) (string, error) {
 	s.name, s.dir, s.command = name, dir, command
+	s.width, s.height = width, height
 	if s.err != nil {
 		return "", s.err
 	}
@@ -1663,6 +1667,13 @@ func TestComposerStartsTheDescribedTaskInATmuxSession(t *testing.T) {
 	}
 	if starter.name != "quick-fix-login" {
 		t.Fatalf("session name = %q, want the task made addressable", starter.name)
+	}
+	// On this 120×40 board the largest pane the floating mirror shows whole is
+	// 110×26: left to tmux the detached session would be 80×24, and its
+	// mirror a small screen adrift in a mostly empty overlay.
+	if starter.width != 110 || starter.height != 26 {
+		t.Fatalf("pane size = %d×%d, want 110×26 to fill the floating mirror",
+			starter.width, starter.height)
 	}
 
 	_, refresh := m.Update(msg)
