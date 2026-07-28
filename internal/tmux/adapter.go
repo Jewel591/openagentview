@@ -104,8 +104,12 @@ func (a *Adapter) ResumeCommand(session agent.Session) (string, []string) {
 
 // Capture, SendText and SendKey expose the pane to the UI so it can mirror a
 // live agent and answer it without leaving the board.
-func (a *Adapter) Capture(ctx context.Context, paneID string) (Screen, error) {
-	return a.client.Capture(ctx, paneID)
+func (a *Adapter) Capture(
+	ctx context.Context,
+	paneID string,
+	history int,
+) (Screen, error) {
+	return a.client.Capture(ctx, paneID, history)
 }
 
 func (a *Adapter) SendText(ctx context.Context, paneID, text string) error {

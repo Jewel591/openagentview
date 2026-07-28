@@ -55,23 +55,38 @@ func (a *previewAdapter) ResumeCommand(agent.Session) (string, []string) {
 }
 
 type fakePanes struct {
-	lines   []string
-	cursorX int
-	cursorY int
-	cursor  bool
-	width   int
-	err     error
-	sent    []string
+	lines    []string
+	history  []string
+	cursorX  int
+	cursorY  int
+	cursor   bool
+	width    int
+	err      error
+	sent     []string
+	captured []int
 }
 
-func (p *fakePanes) Capture(context.Context, string) (tmux.Screen, error) {
-	return tmux.Screen{
+func (p *fakePanes) Capture(
+	_ context.Context, _ string, history int,
+) (tmux.Screen, error) {
+	p.captured = append(p.captured, history)
+	screen := tmux.Screen{
 		Lines:         append([]string(nil), p.lines...),
 		CursorX:       p.cursorX,
 		CursorY:       p.cursorY,
 		CursorVisible: p.cursor,
 		Width:         p.width,
-	}, p.err
+		HistorySize:   len(p.history),
+	}
+	if history > 0 {
+		included := min(history, len(p.history))
+		screen.Lines = append(
+			append([]string(nil), p.history[len(p.history)-included:]...),
+			p.lines...,
+		)
+		screen.History = included
+	}
+	return screen, p.err
 }
 
 func (p *fakePanes) SendText(_ context.Context, pane, text string) error {
@@ -182,6 +197,77 @@ func TestQuickLookFallsBackToTheTranscriptWithoutAPane(t *testing.T) {
 	}
 	if _, ok := loadMsg(t, load).(previewLoadedMsg); !ok {
 		t.Fatal("Quick Look did not fall back to reading the transcript")
+	}
+}
+
+// The resting poll carries only the screen, so scrolling a mirror back must
+// fetch tmux's scrollback at once, hold the reader's place while the pane
+// prints on, and snap back to the live screen when the scroll returns.
+func TestMirrorScrollReachesTheScrollback(t *testing.T) {
+	panes := &fakePanes{
+		lines:   []string{"now"},
+		history: []string{"older", "old"},
+	}
+	m := tmuxModel(panes)
+	load := m.openQuickLook()
+	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
+	settleQuickLook(m)
+	if panes.captured[0] != 0 {
+		t.Fatalf("the opening capture asked for %d rows of history, want none",
+			panes.captured[0])
+	}
+
+	_, cmd := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if cmd == nil {
+		t.Fatal("crossing into scrollback did not refresh the mirror")
+	}
+	msg, ok := cmd().(paneLoadedMsg)
+	if !ok {
+		t.Fatalf("scroll produced %T, want paneLoadedMsg", cmd())
+	}
+	_, _ = m.Update(msg)
+	if last := panes.captured[len(panes.captured)-1]; last != paneHistoryLines {
+		t.Fatalf("scrolled capture asked for %d rows, want %d",
+			last, paneHistoryLines)
+	}
+	if m.paneLines[0] != "older" {
+		t.Fatalf("paneLines start with %q, want the scrollback", m.paneLines[0])
+	}
+	if !strings.Contains(m.View().Content, "older") {
+		t.Fatal("the scrolled mirror did not show the scrollback")
+	}
+
+	// The pane keeps printing while the reader is up in the history; the
+	// offset grows with the content so the rows under their eyes hold still.
+	panes.lines = []string{"now", "brand-new"}
+	before := m.previewScrollBack
+	session := m.previewedSession()
+	next, ok := m.loadPane(*session, m.previewGeneration, false)().(paneLoadedMsg)
+	if !ok {
+		t.Fatal("reload did not produce a paneLoadedMsg")
+	}
+	_, _ = m.Update(next)
+	if m.previewScrollBack != before+1 {
+		t.Fatalf("scrollback offset = %d, want %d to hold the reader's place",
+			m.previewScrollBack, before+1)
+	}
+
+	// Movement between the edges rides the poll; only returning to the bottom
+	// deserves an immediate live screen.
+	for m.previewScrollBack > wheelScrollLines {
+		if _, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown}); cmd != nil {
+			t.Fatal("scrolling within the history refreshed the mirror early")
+		}
+	}
+	_, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if cmd == nil {
+		t.Fatal("returning to the live edge did not refresh the mirror")
+	}
+	if back, ok := cmd().(paneLoadedMsg); ok {
+		_, _ = m.Update(back)
+	}
+	if last := panes.captured[len(panes.captured)-1]; last != 0 {
+		t.Fatalf("the live capture asked for %d rows of history, want none", last)
 	}
 }
 

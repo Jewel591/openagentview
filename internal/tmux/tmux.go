@@ -209,32 +209,51 @@ type Screen struct {
 	// every time the agent printed a longer line.
 	Width  int
 	Height int
+	// History is how many rows of scrollback precede the visible screen in
+	// Lines. HistorySize is how much scrollback the pane holds in total,
+	// whether or not it was captured — the measure of the content that lets a
+	// reader keep their place while the pane goes on printing.
+	History     int
+	HistorySize int
 }
 
 const cursorFormat = "#{cursor_x} #{cursor_y} #{cursor_flag} " +
-	"#{pane_width} #{pane_height}"
+	"#{pane_width} #{pane_height} #{history_size}"
 
 // Capture returns the pane's visible screen, one string per row, with the
 // pane's own colours intact. This is the screen a person would see after
-// attaching, including whatever prompt the agent is waiting on.
+// attaching, including whatever prompt the agent is waiting on. A positive
+// history asks for up to that many rows of scrollback above the screen —
+// tmux hands back what the pane actually holds.
 //
 // The cursor and the cells come back from a single tmux invocation: the mirror
 // polls several times a second while someone is typing into it, and a second
 // process per poll would double that cost for one line of output.
-func (c *Client) Capture(ctx context.Context, paneID string) (Screen, error) {
+func (c *Client) Capture(
+	ctx context.Context,
+	paneID string,
+	history int,
+) (Screen, error) {
 	if paneID == "" {
 		return Screen{}, errors.New("tmux: no pane")
 	}
-	output, err := c.command(
-		ctx,
-		"display-message", "-p", "-t", paneID, cursorFormat,
-		";",
-		"capture-pane", "-p", "-e", "-t", paneID,
-	).Output()
+	capture := []string{"capture-pane", "-p", "-e", "-t", paneID}
+	if history > 0 {
+		capture = append(capture, "-S", "-"+strconv.Itoa(history))
+	}
+	args := append(
+		[]string{"display-message", "-p", "-t", paneID, cursorFormat, ";"},
+		capture...,
+	)
+	output, err := c.command(ctx, args...).Output()
 	if err != nil {
 		return Screen{}, captureError(err)
 	}
-	return parseScreen(string(output)), nil
+	screen := parseScreen(string(output))
+	if history > 0 {
+		screen.History = min(history, screen.HistorySize)
+	}
+	return screen, nil
 }
 
 func parseScreen(output string) Screen {
@@ -256,6 +275,9 @@ func parseScreen(output string) Screen {
 	if len(fields) >= 5 {
 		screen.Width, _ = strconv.Atoi(fields[3])
 		screen.Height, _ = strconv.Atoi(fields[4])
+	}
+	if len(fields) >= 6 {
+		screen.HistorySize, _ = strconv.Atoi(fields[5])
 	}
 	return screen
 }

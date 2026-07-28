@@ -178,7 +178,7 @@ func TestClientMirrorsAndTypesIntoARealPane(t *testing.T) {
 		t.Fatalf("SendKey: %v", err)
 	}
 	waitFor(t, "the typed command to run", func() bool {
-		screen, err := client.Capture(ctx, pane.ID)
+		screen, err := client.Capture(ctx, pane.ID, 0)
 		if err != nil {
 			return false
 		}
@@ -193,7 +193,7 @@ func TestClientMirrorsAndTypesIntoARealPane(t *testing.T) {
 		return false
 	})
 
-	screen, err := client.Capture(ctx, pane.ID)
+	screen, err := client.Capture(ctx, pane.ID, 0)
 	if err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
@@ -213,6 +213,27 @@ func TestClientMirrorsAndTypesIntoARealPane(t *testing.T) {
 		t.Fatalf("cursor = %d,%d, want a position inside the pane",
 			screen.CursorX, screen.CursorY)
 	}
+
+	// Rows pushed off the top of the screen must come back when a capture asks
+	// for history, counted so a mirror can offset the cursor past them.
+	if err := client.SendText(ctx, pane.ID, "seq 1 40"); err != nil {
+		t.Fatalf("SendText: %v", err)
+	}
+	if err := client.SendKey(ctx, pane.ID, "Enter"); err != nil {
+		t.Fatalf("SendKey: %v", err)
+	}
+	waitFor(t, "the output to scroll into history", func() bool {
+		deep, err := client.Capture(ctx, pane.ID, 100)
+		if err != nil || deep.History == 0 || len(deep.Lines) <= 12 {
+			return false
+		}
+		for _, line := range deep.Lines {
+			if strings.TrimSpace(line) == "1" {
+				return true
+			}
+		}
+		return false
+	})
 
 	// A process started inside the pane must resolve back to it, which is the
 	// whole basis for matching a running agent to a pane.
@@ -271,14 +292,14 @@ func TestParseScreenKeepsContentWhenTheCursorLineIsMissing(t *testing.T) {
 func TestCaptureReportsAMissingPane(t *testing.T) {
 	client := testClient(t)
 	ctx := context.Background()
-	if _, err := client.Capture(ctx, ""); err == nil {
+	if _, err := client.Capture(ctx, "", 0); err == nil {
 		t.Fatal("Capture() accepted an empty pane id")
 	}
 	start := client.command(ctx, "new-session", "-d", "-s", "t")
 	if out, err := start.CombinedOutput(); err != nil {
 		t.Fatalf("new-session: %v: %s", err, out)
 	}
-	_, err := client.Capture(ctx, "%999")
+	_, err := client.Capture(ctx, "%999", 0)
 	if err == nil || !strings.Contains(err.Error(), "can't find pane") {
 		t.Fatalf("Capture(missing) error = %v, want tmux's own message", err)
 	}
