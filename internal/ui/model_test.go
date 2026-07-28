@@ -2389,6 +2389,33 @@ func TestComposerMenuFitsAShortTerminal(t *testing.T) {
 	}
 }
 
+func TestComposerMenuCapHoldsForTrailingSlashPaths(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := composerModelWithProjects(&fakeStarter{})
+	m.height = 13
+
+	// A trailing slash puts the directory itself in the menu before its
+	// children are listed; the single-row budget must hold from there too,
+	// and tab completing writes exactly this shape of query.
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@"+root+"/")
+
+	if got := m.composeMenuEntries(); len(got) != 1 {
+		t.Fatalf("a 13-row terminal got %d entries for a trailing-slash path", len(got))
+	}
+	if rows := m.composeMenuRows(); len(rows) != 1 {
+		t.Fatalf("a 13-row terminal got %d menu rows for a trailing-slash path", len(rows))
+	}
+	if got, room := m.composerHeight(), m.height-4-m.footerHeight()-minBoardHeight; got > room {
+		t.Fatalf("composer takes %d rows, more than the %d the terminal has spare", got, room)
+	}
+}
+
 func TestComposerAtInsideAWordIsNotAMention(t *testing.T) {
 	m := composerModelWithProjects(&fakeStarter{})
 

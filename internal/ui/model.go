@@ -1484,6 +1484,9 @@ func completeDirs(query string, limit int) []string {
 			entries = append(entries, filepath.Clean(expanded))
 		}
 	}
+	if len(entries) >= limit {
+		return entries
+	}
 	listed, err := os.ReadDir(parent)
 	if err != nil {
 		return entries
@@ -1505,7 +1508,7 @@ func completeDirs(query string, limit int) []string {
 			}
 		}
 		entries = append(entries, full)
-		if len(entries) == limit {
+		if len(entries) >= limit {
 			break
 		}
 	}
