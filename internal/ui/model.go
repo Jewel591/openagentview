@@ -743,7 +743,12 @@ func (m *Model) paneScrollRefresh(before int) tea.Cmd {
 	if session == nil {
 		return nil
 	}
-	return m.loadPane(*session, m.previewGeneration, false)
+	// A capture already in flight answers for the other side of the edge, and
+	// landing late it would replace the history someone is reading with a
+	// bare screen until the next tick. Retiring the generation drops it — and
+	// the poll chain with it, so the reload restarts the poll.
+	m.previewGeneration++
+	return m.loadPane(*session, m.previewGeneration, true)
 }
 
 // handleClick resolves a click against the zones the last frame recorded.

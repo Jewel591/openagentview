@@ -217,6 +217,11 @@ func TestMirrorScrollReachesTheScrollback(t *testing.T) {
 			panes.captured[0])
 	}
 
+	// A poll capture dispatched before the crossing is still in flight; its
+	// screen-only frame must die with its generation rather than land later
+	// and briefly replace the history being read.
+	stale := m.loadPane(m.previewSession, m.previewGeneration, true)
+
 	_, cmd := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
 	if cmd == nil {
 		t.Fatal("crossing into scrollback did not refresh the mirror")
@@ -235,6 +240,11 @@ func TestMirrorScrollReachesTheScrollback(t *testing.T) {
 	}
 	if !strings.Contains(m.View().Content, "older") {
 		t.Fatal("the scrolled mirror did not show the scrollback")
+	}
+
+	_, _ = m.Update(stale().(paneLoadedMsg))
+	if m.paneLines[0] != "older" {
+		t.Fatal("a stale screen-only frame replaced the scrollback")
 	}
 
 	// The pane keeps printing while the reader is up in the history; the
