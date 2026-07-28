@@ -917,11 +917,15 @@ func TestListDescriptionFallsBackToLocation(t *testing.T) {
 		CWD:     "/projects/mono",
 		Branch:  "fix/parser",
 	}
-	if got := listDescription(session); got != "codex · mono · fix/parser" {
+	if got := listDescription(session, true); got != "codex · mono · fix/parser" {
 		t.Fatalf("description = %q, want the session's location", got)
 	}
+	// Grouped by project, the heading above the row already names it.
+	if got := listDescription(session, false); got != "codex · fix/parser" {
+		t.Fatalf("description = %q, want the location without the project", got)
+	}
 	session.Preview = "Fix the parser, then add a regression test"
-	if got := listDescription(session); got != session.Preview {
+	if got := listDescription(session, true); got != session.Preview {
 		t.Fatalf("description = %q, want the prompt", got)
 	}
 }

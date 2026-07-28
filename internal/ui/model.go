@@ -1562,6 +1562,20 @@ const composeMenuMax = 6
 // past the bottom of the terminal.
 const minBoardHeight = 5
 
+// A card's proportions, in terminal cells: three lines of content and the
+// border around them, with one row between cards. The screen's job is to hold
+// as much of the fleet as it can at once — a card that spends rows on air is
+// a session someone has to scroll to find.
+const (
+	cardHeight = 5
+	cardStride = cardHeight + 1
+	// compactCardHeight is the same card with the gap after it given up, for
+	// columns too short to hold even one card and its breathing room.
+	compactCardHeight = cardHeight
+	cardChrome        = 4 // two border columns and one of padding on each side
+	maxColumnWidth    = 52
+)
+
 // composeTextEdited is every edit's bookkeeping: the entries under the menu
 // changed, so the highlight and a standing dismissal are both stale.
 func (m *Model) composeTextEdited() {
@@ -1947,9 +1961,9 @@ func (m *Model) columns() []column {
 	// The group that wants a person comes first, in both layouts: the list is
 	// read top to bottom, and the board is scanned left to right.
 	columns := []column{
-		{title: "Needs You", status: agent.StatusNeedsYou, color: "#F59E0B"},
-		{title: "Running", status: agent.StatusRunning, color: "#34D399"},
-		{title: "Idle", status: agent.StatusIdle, color: "#60A5FA"},
+		{title: "NEEDS YOU", status: agent.StatusNeedsYou, color: "#F59E0B"},
+		{title: "RUNNING", status: agent.StatusRunning, color: "#34D399"},
+		{title: "IDLE", status: agent.StatusIdle, color: "#60A5FA"},
 	}
 	// Error means openagentview could not read a session's log — a fault of the
 	// machine, not a stage of an agent's life — so the group only exists while
@@ -1957,7 +1971,7 @@ func (m *Model) columns() []column {
 	// archiving is asking for a session to be out of sight.
 	if m.anyErrorSessions() {
 		columns = append(columns, column{
-			title:  "Error",
+			title:  "ERROR",
 			status: agent.StatusError,
 			color:  "#F87171",
 		})
@@ -2196,7 +2210,16 @@ var (
 	tabStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#94A3B8")).
 			Padding(0, 1)
+	ruleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#334155"))
 )
+
+// dashedBorder frames the placeholder an empty column shows: dashes say
+// "nothing here yet" where a solid card border would say "something".
+var dashedBorder = lipgloss.Border{
+	Top: "╌", Bottom: "╌", Left: "┆", Right: "┆",
+	TopLeft: "╭", TopRight: "╮", BottomLeft: "╰", BottomRight: "╯",
+}
 
 // renderHeader lays the two axes out as two runs of tabs with a rule between
 // them: Status and Projects say what the sessions are grouped by, Kanban and
@@ -2290,6 +2313,13 @@ func (m *Model) renderBoard() string {
 		return ""
 	}
 	availableHeight := max(minBoardHeight, m.height-4-m.footerHeight()-m.composerHeight())
+	total := 0
+	for i := range columns {
+		total += len(m.cardsForColumn(i))
+	}
+	if total == 0 {
+		return m.renderEmptyBoard(availableHeight)
+	}
 	if m.layout == layoutList {
 		return m.renderList(columns, availableHeight)
 	}
@@ -2297,22 +2327,88 @@ func (m *Model) renderBoard() string {
 		return m.renderCompactBoard(columns, availableHeight)
 	}
 
-	gap := 1
+	gap := 2
 	maxVisible := max(1, m.width/24)
 	maxVisible = min(maxVisible, len(columns))
 	start := m.column - maxVisible/2
 	start = max(0, min(start, len(columns)-maxVisible))
 	end := start + maxVisible
+	// Columns share the width evenly but stop growing past maxColumnWidth: a
+	// card stretched the whole of an ultrawide terminal reads as a rule with
+	// text on it rather than as a card, and its three lines are then a long
+	// way apart for how little each one says.
 	columnWidth := max(18, (m.width-gap*(maxVisible-1))/maxVisible)
+	columnWidth = min(columnWidth, maxColumnWidth)
+	// Once the columns stop growing they are centered rather than left in
+	// place: an even margin on both sides reads as a deliberate measure, a
+	// pile of empty space on the right reads as a bug.
+	indent := max(0, (m.width-(columnWidth*maxVisible+gap*(maxVisible-1)))/2)
 	rendered := make([]string, 0, maxVisible)
 	for i := start; i < end; i++ {
 		column := columns[i]
-		originX := (i - start) * (columnWidth + gap)
+		originX := indent + (i-start)*(columnWidth+gap)
 		rendered = append(rendered, m.renderColumn(
 			i, column, columnWidth, availableHeight, originX, boardTopRow,
 		))
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, intersperse(rendered, " ")...)
+	return lipgloss.NewStyle().PaddingLeft(indent).Render(
+		lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			intersperse(rendered, strings.Repeat(" ", gap))...,
+		),
+	)
+}
+
+// renderEmptyBoard replaces the board when there is nothing at all to put on
+// it. Empty is either "the filter matched nothing" — in which case the query
+// deserves the explanation — or "no agent has run in the last day", in which
+// case what earns a session a place here does.
+func (m *Model) renderEmptyBoard(height int) string {
+	inner := max(8, m.width-6)
+	bright := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E2E8F0"))
+	hint := func(key, text string) string {
+		return ruleStyle.Render("│ ") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#94A3B8")).Render(key) +
+			mutedStyle.Render("  "+text)
+	}
+	var lines []string
+	if query := strings.TrimSpace(m.query); query != "" {
+		lines = append(lines,
+			bright.Render(truncate("Nothing matches "+query+".", inner)),
+			"",
+			mutedStyle.Render(truncate(fmt.Sprintf(
+				"Searching title, project, branch and agent across %d sessions.",
+				len(m.sessions),
+			), inner)),
+			"",
+			hint("esc", "clear the filter"),
+		)
+		if !m.searching {
+			lines = append(lines, hint("/", "edit the query"))
+		}
+	} else {
+		lines = append(lines,
+			bright.Render("No agents running."),
+			"",
+			mutedStyle.Render(truncate(
+				"openagentview watches tmux panes and agent logs.", inner,
+			)),
+			mutedStyle.Render(truncate(
+				"Start claude, codex, or grok anywhere and it shows up here within a second.",
+				inner,
+			)),
+			"",
+		)
+		if m.canCompose() {
+			lines = append(lines, hint("n", "start a task from here"))
+		}
+		lines = append(lines, hint("r", "rescan now"))
+	}
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(height).
+		Padding(1, 2).
+		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
 func (m *Model) renderCompactBoard(columns []column, height int) string {
@@ -2537,7 +2633,10 @@ func (m *Model) renderListRow(session agent.Session, selected bool) string {
 	if descriptionWidth < 8 {
 		return line
 	}
-	description := truncate(listDescription(session), descriptionWidth)
+	description := truncate(
+		listDescription(session, m.group != groupProject),
+		descriptionWidth,
+	)
 	padding := descriptionWidth - lipgloss.Width(description)
 	return line + "  " + mutedStyle.Render(description) +
 		strings.Repeat(" ", padding+1) + mutedStyle.Render(age)
@@ -2546,13 +2645,18 @@ func (m *Model) renderListRow(session agent.Session, selected bool) string {
 // listDescription is what the session is about, said in one line. The first
 // prompt is the best answer available; where it is also the title — which is
 // what a session without a summary falls back to — repeating it says nothing,
-// so the session's whereabouts are shown instead.
-func listDescription(session agent.Session) string {
+// so the session's whereabouts are shown instead. Grouped by project the
+// heading above the row has already named the project, so the whereabouts
+// leave it out.
+func listDescription(session agent.Session, withProject bool) string {
 	preview := strings.TrimSpace(strings.ReplaceAll(session.Preview, "\n", " "))
 	if preview != "" && preview != strings.TrimSpace(session.Title) {
 		return preview
 	}
-	location := session.Agent + " · " + projectName(session.CWD)
+	location := session.Agent
+	if withProject {
+		location += " · " + projectName(session.CWD)
+	}
 	if session.TmuxTarget != "" {
 		location += " · tmux " + session.TmuxTarget
 	} else if session.Branch != "" {
@@ -2591,14 +2695,34 @@ func (m *Model) renderColumn(
 	width, height, originX, originY int,
 ) string {
 	cards := m.cardsForColumn(index)
-	headerStyle := lipgloss.NewStyle().
+	// The header is the group's name, its count, and a rule out to the
+	// column's edge — the rule keeps an empty column visibly a column. A
+	// count of zero dims the name: the gap is the signal, not the label.
+	headerWidth := max(1, width-2)
+	titleColor := column.color
+	if len(cards) == 0 {
+		titleColor = "#475569"
+	}
+	header := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color(column.color)).
-		Width(max(1, width-2))
-	header := headerStyle.Render(fmt.Sprintf("● %s  %d", column.title, len(cards)))
+		Foreground(lipgloss.Color(titleColor)).
+		Render(column.title) +
+		mutedStyle.Render(fmt.Sprintf("  %d", len(cards)))
+	if ruleWidth := headerWidth - lipgloss.Width(header) - 1; ruleWidth > 0 {
+		header += " " + ruleStyle.Render(strings.Repeat("─", ruleWidth))
+	}
+	header = truncate(header, headerWidth)
 
-	cardHeight := 5
-	capacity := max(1, (height-2)/cardHeight)
+	// A card occupies cardHeight rows and the one below it is cardStride rows
+	// further down: the row between them is what keeps a run of cards reading
+	// as separate cards rather than as one ruled table. A column too short
+	// for even that gives the row up rather than clip a card.
+	roomy := height-1 >= cardStride
+	stride := cardStride
+	if !roomy {
+		stride = compactCardHeight
+	}
+	capacity := max(1, (height-1)/stride)
 	start := 0
 	if index == m.column && m.row >= capacity {
 		start = m.row - capacity + 1
@@ -2609,7 +2733,7 @@ func (m *Model) renderColumn(
 		selected := index == m.column && i == m.row
 		rect := screenRect{
 			x:      originX + 1,
-			y:      originY + 1 + (i-start)*cardHeight,
+			y:      originY + 1 + (i-start)*stride,
 			width:  width - 2,
 			height: cardHeight,
 		}
@@ -2622,13 +2746,19 @@ func (m *Model) renderColumn(
 			column: index,
 			row:    i,
 		})
+		if len(renderedCards) > 0 && roomy {
+			renderedCards = append(renderedCards, "")
+		}
 		renderedCards = append(
 			renderedCards,
 			m.renderCard(cards[i], width-2, selected, column.color),
 		)
 	}
 	if len(renderedCards) == 0 {
-		renderedCards = append(renderedCards, mutedStyle.Render("  No sessions"))
+		renderedCards = append(
+			renderedCards,
+			m.emptyColumnBox(column.status, width-2),
+		)
 	}
 	body := lipgloss.JoinVertical(lipgloss.Left, renderedCards...)
 	return lipgloss.NewStyle().
@@ -2638,35 +2768,165 @@ func (m *Model) renderColumn(
 		Render(lipgloss.JoinVertical(lipgloss.Left, header, body))
 }
 
-func (m *Model) renderCard(s agent.Session, width int, selected bool, color string) string {
+// agentColors is each agent's own hue, taken from its brand and dimmed a step
+// from the palette the rest of the board uses: the badge is a label to
+// recognize, not a signal to react to — attention is the amber dot's job.
+var agentColors = map[string]string{
+	"claude": "#C97B5A",
+	"codex":  "#8FA3B8",
+	"grok":   "#8B7BC4",
+}
+
+// agentBadge is the agent's name at the card's top-left, in the agent's own
+// color so two otherwise identical cards tell apart at a glance. Color is the
+// whole badge: neither a filled block nor a drawn outline earns the width and
+// weight it costs on the card's least important line. A settled session keeps
+// the name and gives up the color — which agent it was still matters, but not
+// enough to compete with the sessions that are still moving.
+func agentBadge(s agent.Session, live bool) string {
+	color, ok := agentColors[strings.ToLower(s.Agent)]
+	if !ok || !live {
+		color = "#475569"
+	}
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color(color)).
+		Render(strings.ToUpper(s.Agent))
+}
+
+func (m *Model) renderCard(
+	s agent.Session,
+	width int,
+	selected bool,
+	color string,
+) string {
 	borderColor := "#334155"
 	if selected {
 		borderColor = color
 	}
-	title := truncate(s.Title, max(8, width-4))
-	// The agent leads the meta line: with more than one agent on the board it
-	// is the difference between two otherwise identical cards.
-	location := s.Agent + " · " + filepath.Base(s.CWD)
-	if s.Branch != "" {
-		location += " · " + s.Branch
+	inner := max(8, width-cardChrome)
+
+	// A session nobody is waiting on and nothing is happening in gets no
+	// color and no brightness: color on this board means an agent is at work
+	// or wants a person, and a wall of settled sessions wearing their agents'
+	// colors — which is what the project grouping is — says neither. Dimming
+	// the whole card is also what makes the few live ones findable.
+	live := s.RuntimeStatus == agent.StatusRunning ||
+		s.RuntimeStatus == agent.StatusNeedsYou ||
+		s.RuntimeStatus == agent.StatusError
+	projectColor, titleColor := "#CBD5E1", "#F8FAFC"
+	if !live {
+		projectColor, titleColor = "#64748B", "#94A3B8"
 	}
-	if s.TmuxTarget != "" {
-		// Where a session is attached is what tells a reader they can walk over
-		// to it, so it outranks the branch when the line has to be cut.
-		location = s.Agent + " · tmux " + s.TmuxTarget + " · " + filepath.Base(s.CWD)
+
+	// The top line is who and where: the agent's badge, the project, and —
+	// right-aligned, in the card's faintest tone — the branch, or the tmux
+	// pane when there is no branch to name. Grouped by project the column
+	// header has already said which project this is, so the card drops it
+	// and spends the width on the branch instead.
+	badge := agentBadge(s, live)
+	dot := ""
+	if s.RuntimeStatus == agent.StatusNeedsYou {
+		dot = " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("●")
 	}
-	meta := truncate(location, max(8, width-4))
-	age := relativeTime(s.UpdatedAt)
+	meta := badge + dot
+	if m.group != groupProject {
+		project := truncate(
+			filepath.Base(s.CWD),
+			max(1, inner-lipgloss.Width(badge)-1-lipgloss.Width(dot)),
+		)
+		meta = badge + " " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color(projectColor)).Render(project) + dot
+	}
+	right := s.Branch
+	if right == "" && s.TmuxTarget != "" {
+		right = "tmux " + s.TmuxTarget
+	}
+	if avail := inner - lipgloss.Width(meta) - 2; right != "" && avail >= 4 {
+		right = truncate(right, avail)
+		gap := inner - lipgloss.Width(meta) - lipgloss.Width(right)
+		meta += strings.Repeat(" ", gap) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#475569")).Render(right)
+	}
+
+	title := truncate(s.Title, inner)
+
+	// The bottom line is what the session is doing or asking, amber when it
+	// is a question waiting on a person. A session whose preview only repeats
+	// its title has nothing to add, so its age speaks instead; a settled
+	// session carries its age alongside.
+	detail := strings.TrimSpace(strings.ReplaceAll(s.Preview, "\n", " "))
+	if detail == strings.TrimSpace(s.Title) {
+		detail = ""
+	}
+	if detail == "" {
+		detail = relativeTime(s.UpdatedAt)
+	} else if s.RuntimeStatus == agent.StatusIdle {
+		detail += " · " + shortAge(s.UpdatedAt)
+	}
+	detailStyle := mutedStyle
+	if !live {
+		detailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#475569"))
+	}
+	if s.RuntimeStatus == agent.StatusNeedsYou {
+		detailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+	}
 	return lipgloss.NewStyle().
 		Width(width).
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(borderColor)).
 		Padding(0, 1).
 		Render(
-			lipgloss.NewStyle().Bold(selected).Foreground(lipgloss.Color("#E2E8F0")).Render(title) +
-				"\n" + mutedStyle.Render(meta) +
-				"\n" + mutedStyle.Render(age),
+			// The three lines stay tight against each other. A terminal's
+			// only unit of leading is a whole blank row, and a row between
+			// them is more air than the card has content to justify — it
+			// reads as three loose lines rather than as one card.
+			meta + "\n" +
+				// The title is the card: always bold, always the brightest
+				// line it has. Selection is the border's job.
+				lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color(titleColor)).
+					Render(title) +
+				"\n" + detailStyle.Render(truncate(detail, inner)),
 		)
+}
+
+// emptyColumnBox is what an empty column holds instead of cards: a dashed
+// frame with a line on why it is empty, so a bare column reads as a fact
+// about the fleet rather than a rendering gap. Nothing in it is colored —
+// color on this board means a session wants something, and an empty column is
+// the one place with nothing to want.
+func (m *Model) emptyColumnBox(status agent.RuntimeStatus, width int) string {
+	var lead, detail string
+	switch status {
+	case agent.StatusNeedsYou:
+		lead = "nothing waiting on you"
+		detail = "agents will land here when they ask"
+	case agent.StatusRunning:
+		lead = "no agents running"
+		detail = "sessions show up here within a second"
+		if m.canCompose() {
+			detail = "press n to start a task"
+		}
+	case agent.StatusIdle:
+		lead = "no idle sessions"
+		detail = "finished work moves out after 24h"
+	default:
+		lead = "no sessions"
+	}
+	inner := max(8, width-cardChrome)
+	body := mutedStyle.Render(truncate(lead, inner))
+	if detail != "" {
+		body += "\n" + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#475569")).
+			Render(truncate(detail, inner))
+	}
+	return lipgloss.NewStyle().
+		Width(width).
+		Border(dashedBorder).
+		BorderForeground(lipgloss.Color("#334155")).
+		Padding(0, 1).
+		Render(body)
 }
 
 // renderComposer draws the standing input at the bottom of the board: the
