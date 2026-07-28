@@ -65,6 +65,13 @@ other agents' sessions keep working.
 go install github.com/Jewel591/openagentview/cmd/openagentview@latest
 ```
 
+`@latest` installs the newest tagged release. `main` moves faster than the
+tags; to try what has merged but not yet shipped:
+
+```sh
+go install github.com/Jewel591/openagentview/cmd/openagentview@main
+```
+
 Or build from a clone:
 
 ```sh
