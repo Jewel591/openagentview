@@ -1954,25 +1954,17 @@ func TestCompactTabsPageAndSwitchColumnsOnClick(t *testing.T) {
 	}
 }
 
-func TestWheelOnTheBoardMovesTheSelection(t *testing.T) {
+func TestWheelLeavesTheBoardSelectionAlone(t *testing.T) {
+	// A trackpad's inertia fires dozens of wheel events per flick; mapped to
+	// the selection, a stray swipe sent it flying. Only Quick Look scrolls.
 	m := clickBoardModel()
-	if m.row != 0 {
-		t.Fatalf("selection starts at row %d, want 0", m.row)
-	}
+	column, row := m.column, m.row
 
 	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
-	if m.row != 1 {
-		t.Fatalf("wheel down moved to row %d, want 1", m.row)
-	}
-	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
-	if m.row != 0 {
-		t.Fatalf("wheel up moved to row %d, want 0", m.row)
-	}
-
-	m.detail = true
 	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
-	if m.row != 0 {
-		t.Fatal("the wheel moved the selection behind the detail card")
+	if m.column != column || m.row != row {
+		t.Fatalf("wheel moved the selection from column %d row %d to column %d row %d",
+			column, row, m.column, m.row)
 	}
 }
 

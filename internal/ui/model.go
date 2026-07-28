@@ -615,17 +615,11 @@ const wheelScrollLines = 3
 // mid-typing, whereas the arrow keys it would otherwise become walk an
 // agent's input history.
 func (m *Model) handleWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	// The wheel only moves what actually scrolls, which is Quick Look's
+	// body. On the board it does nothing: the board is one screen, and a
+	// trackpad's inertia fires dozens of wheel events per flick — mapped to
+	// the selection, a stray swipe sent it flying. Keys and clicks select.
 	if !m.previewOpen {
-		// The selection only moves while the board is what is being looked at.
-		if m.detail || m.helpOpen || m.searching || m.composing {
-			return m, nil
-		}
-		switch msg.Button {
-		case tea.MouseWheelUp:
-			m.moveRow(-1)
-		case tea.MouseWheelDown:
-			m.moveRow(1)
-		}
 		return m, nil
 	}
 	switch msg.Button {
