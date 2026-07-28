@@ -2697,22 +2697,20 @@ func (m *Model) footerHeight() int {
 	return 5
 }
 
+// renderShortcutHelp is deliberately one short line of the keys worth
+// memorizing. Everything contextual teaches itself where it applies — the
+// standing footer names the views, the composer and Quick Look each carry
+// their own hints — and a wall of every binding reads as none of them.
 func (m *Model) renderShortcutHelp() string {
 	var lines []string
 	if m.width < 100 {
 		lines = []string{
-			"tab group by  ·  v layout  ·  ←/→ columns  ·  ↑/↓ sessions",
-			"enter open  ·  space preview  ·  d details  ·  / search",
-			"tmux preview types into the agent  ·  ctrl+space = space  ·  space closes",
-			"click selects  ·  click again previews  ·  shift/option+drag selects text",
-			"n new session  ·  a archive  ·  ctrl+x ×2 dismiss  ·  r refresh  ·  q quit  ·  ? close",
+			"↑↓←→ move  ·  enter open  ·  space quick look  ·  n new task",
+			"/ search  ·  a archive  ·  ctrl+x ×2 dismiss  ·  q quit",
 		}
 	} else {
 		lines = []string{
-			"tab group by status/projects     v kanban/list layout     ←/→ switch columns     ↑/↓ select session     enter open     space preview",
-			"a tmux preview types into the agent   ctrl+space types a space   space closes it   ctrl+] browses   t transcript   i type again",
-			"click selects a card   click again opens quick look   click outside closes it   shift/option+drag selects text",
-			"/ search      n new session      d details      a archive      ctrl+x twice dismiss      r refresh     q quit     ? close",
+			"↑↓←→ move   ·   enter open   ·   space quick look   ·   n new task   ·   / search   ·   a archive   ·   ctrl+x ×2 dismiss   ·   q quit",
 		}
 	}
 	return lipgloss.NewStyle().
