@@ -2716,6 +2716,12 @@ func (m *Model) shortcutHelpLines() []string {
 
 func (m *Model) renderShortcutHelp() string {
 	lines := m.shortcutHelpLines()
+	// Each line is truncated to the width rather than wrapped, the way every
+	// other footer line is — footerHeight promises exactly len(lines)+1 rows,
+	// and a wrap below 55 columns would silently break that promise.
+	for i, line := range lines {
+		lines[i] = truncate(line, max(1, m.width-2))
+	}
 	return lipgloss.NewStyle().
 		Width(m.width).
 		BorderTop(true).
