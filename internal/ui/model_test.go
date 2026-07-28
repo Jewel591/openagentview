@@ -917,11 +917,15 @@ func TestListDescriptionFallsBackToLocation(t *testing.T) {
 		CWD:     "/projects/mono",
 		Branch:  "fix/parser",
 	}
-	if got := listDescription(session); got != "codex · mono · fix/parser" {
+	if got := listDescription(session, true); got != "codex · mono · fix/parser" {
 		t.Fatalf("description = %q, want the session's location", got)
 	}
+	// Grouped by project, the heading above the row already names it.
+	if got := listDescription(session, false); got != "codex · fix/parser" {
+		t.Fatalf("description = %q, want the location without the project", got)
+	}
 	session.Preview = "Fix the parser, then add a regression test"
-	if got := listDescription(session); got != session.Preview {
+	if got := listDescription(session, true); got != session.Preview {
 		t.Fatalf("description = %q, want the prompt", got)
 	}
 }
@@ -2889,5 +2893,56 @@ func TestComposerDirSurvivesTheDraftBeingPutDown(t *testing.T) {
 
 	if m.currentComposeDir() != "/projects/alpha" {
 		t.Fatalf("reopening the composer forgot the picked directory: %q", m.currentComposeDir())
+	}
+}
+
+// A column that has the rows for two cards shows two: counting the gap after
+// the last card as spent would scroll a board that fits.
+func TestColumnShowsEveryCardThatFits(t *testing.T) {
+	now := time.Now()
+	m := &Model{
+		group:    groupStatus,
+		layout:   layoutKanban,
+		width:    120,
+		lastSync: now,
+		sessions: []agent.Session{
+			{ID: "a", Title: "first", RuntimeStatus: agent.StatusRunning, RecencyAt: now},
+			{ID: "b", Title: "second", RuntimeStatus: agent.StatusRunning, RecencyAt: now},
+		},
+	}
+	// One header row plus two cards and the gap between them.
+	board := m.renderColumn(1, m.columns()[1], 40, 1+2*cardHeight+1, 0, boardTopRow)
+	for _, title := range []string{"first", "second"} {
+		if !strings.Contains(board, title) {
+			t.Fatalf("column dropped %q with room for it:\n%s", title, board)
+		}
+	}
+}
+
+// Grouped by project an empty board has no columns at all, and must still say
+// why it is empty rather than render as a blank rectangle.
+func TestEmptyProjectBoardExplainsItself(t *testing.T) {
+	m := &Model{
+		group:    groupProject,
+		layout:   layoutKanban,
+		width:    120,
+		height:   40,
+		lastSync: time.Now(),
+	}
+	if board := m.renderBoard(); !strings.Contains(board, "No agents running.") {
+		t.Fatalf("empty project board = %q, want the empty state", board)
+	}
+}
+
+// The first discovery takes up to a few seconds; until it lands the board has
+// found nothing, which is not the same as there being nothing.
+func TestBoardWaitsForTheFirstScanBeforeSayingItIsEmpty(t *testing.T) {
+	m := &Model{group: groupStatus, layout: layoutKanban, width: 120, height: 40}
+	board := m.renderBoard()
+	if strings.Contains(board, "No agents running.") {
+		t.Fatalf("board called itself empty before the first scan:\n%s", board)
+	}
+	if !strings.Contains(board, "Looking for sessions") {
+		t.Fatalf("board = %q, want the pre-scan state", board)
 	}
 }
