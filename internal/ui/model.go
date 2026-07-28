@@ -3025,14 +3025,24 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 		hints = "i type · t transcript · enter open in tab · esc close"
 	case selected != nil && m.canMirrorPane(*selected):
 		hints = "t live pane · ↑↓ scroll · enter open in tab · esc close"
-	case selected != nil && m.previewLive():
+	}
+	var note string
+	if selected != nil && !m.paneView && !m.canMirrorPane(*selected) &&
+		m.previewLive() {
 		// A live session without a pane is the one case where the missing
 		// ability to type needs explaining: a finished transcript reads as a
 		// record on its own, but a running one looks like it should answer.
-		hints = "view only (not in tmux) · " + hints
+		// The note is kept apart from the key hints because it must outlive
+		// them: a live session always has an activity line, and behind one the
+		// hints are dropped whole — keys can be learned once, the explanation
+		// cannot.
+		note = "view only (not in tmux)"
 	}
 	activity := m.previewActivityLine()
 	if activity == "" {
+		if note != "" {
+			hints = note + " · " + hints
+		}
 		return mutedStyle.Render(truncate(hints, contentWidth))
 	}
 	activity = truncate(activity, contentWidth)
@@ -3040,6 +3050,13 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 		Foreground(lipgloss.Color("#34D399")).
 		Render(activity)
 	remaining := contentWidth - utf8.RuneCountInString(activity) - 3
+	if note != "" {
+		if remaining < utf8.RuneCountInString(note) {
+			return rendered
+		}
+		rendered += mutedStyle.Render(" · " + note)
+		remaining -= utf8.RuneCountInString(note) + 3
+	}
 	if remaining < utf8.RuneCountInString(hints) {
 		return rendered
 	}
