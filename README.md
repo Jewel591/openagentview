@@ -36,8 +36,10 @@ resume any session, or start a new one.
   long turn produces before it says anything
 - Mirrors the tmux pane of a session running in one, and types into it, so a
   prompt the agent is blocked on can be answered without leaving the board
-- Resumes a session with that agent's installed CLI, or returns to the pane it
-  is already running in
+- Goes to a session in a new tab of the terminal it is running in — attaching
+  to the tmux pane a live session occupies, or resuming a finished one with
+  that agent's installed CLI — so the board keeps its own window; terminals
+  without a tab interface fall back to opening in place
 - Starts a new session from the board: a standing input under the board takes
   a task description and opens it as a fresh agent — any installed one — in a
   detached tmux session of its own, which discovery then picks up like any
@@ -105,13 +107,12 @@ openagentview --codex-home /path/to/.codex \
 | --- | --- |
 | `←` `→` / `h` `l` | Move between columns |
 | `↑` `↓` / `k` `j` | Move between cards |
-| `Enter` | Resume the selected session |
-| `d` / `Space` | Open session details |
+| `Enter` / `Space` | Quick Look the selected conversation |
+| `Ctrl+Enter` | Open the session in a new terminal tab |
+| `d` | Open session details |
 | `Ctrl+S` / `Tab` | Group by Status / Projects |
 | `v` | Switch the Kanban / List layout |
 | `?` | Show or hide all shortcuts |
-| `Space` | Quick Look the selected conversation |
-| `d` | Show session metadata |
 | `/` / `s` | Search |
 | `n` | Describe a task and start it as a new tmux session |
 | `a` | Archive an idle session |
@@ -146,8 +147,14 @@ Once `Ctrl+]` has stopped typing:
 | --- | --- |
 | `t` | Switch between the live pane and the stored transcript |
 | `i` | Start typing again |
-| `Enter` | Attach to the pane, or switch to it when already inside tmux |
+| `Enter` | Open the session in a new terminal tab |
 | `Esc` / `Space` | Close Quick Look |
+
+Opening a tab drives the terminal's own scripting interface — AppleScript
+for Ghostty, iTerm2 and Terminal.app (macOS asks once for automation
+permission), the remote-control CLI for kitty and WezTerm. In a terminal the
+board cannot ask for a tab, going to a session falls back to taking over the
+board's window until the agent exits.
 
 ## Data safety
 

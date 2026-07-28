@@ -19,6 +19,7 @@ import (
 
 	"github.com/Jewel591/openagentview/internal/agent"
 	"github.com/Jewel591/openagentview/internal/dismiss"
+	"github.com/Jewel591/openagentview/internal/terminal"
 	"github.com/Jewel591/openagentview/internal/tmux"
 )
 
@@ -179,6 +180,11 @@ type resumeFinishedMsg struct {
 	err error
 }
 
+// tabOpenedMsg is the terminal's answer to a new-tab request.
+type tabOpenedMsg struct {
+	err error
+}
+
 type tickMsg time.Time
 
 type previewBackdrop struct {
@@ -197,6 +203,10 @@ type Model struct {
 	panes     PaneController
 	starter   SessionStarter
 	launchers []Launcher
+	// opener asks the surrounding terminal for a new tab, nil when the
+	// terminal is not one the board knows how to ask — going to a session
+	// then falls back to handing this window over.
+	opener TabOpener
 	// dismissals is the board's own record of sessions asked off it, nil when
 	// its state file could not be read — the board still works, and ctrl+x
 	// says what is wrong instead of writing over the file.
@@ -300,6 +310,11 @@ type Model struct {
 	animating bool
 }
 
+// TabOpener opens a command in a new tab of the surrounding terminal.
+type TabOpener interface {
+	OpenTab(dir string, command []string) error
+}
+
 // PaneController is the part of tmux Quick Look needs: a live mirror of a
 // pane, and a way to answer whatever the agent in it is waiting on.
 type PaneController interface {
@@ -334,8 +349,15 @@ func New(
 	if err != nil {
 		workdir = ""
 	}
+	// A typed nil must not become a non-nil interface, or the fallback
+	// below it would never run.
+	var opener TabOpener
+	if detected := terminal.Detect(); detected != nil {
+		opener = detected
+	}
 	return &Model{
 		adapter:        adapter,
+		opener:         opener,
 		panes:          panes,
 		starter:        starter,
 		launchers:      launchers,
@@ -545,6 +567,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resumeFinishedMsg:
 		if msg.err != nil {
 			m.status = "Resume failed: " + msg.err.Error()
+		}
+		return m, m.refreshCmd()
+	case tabOpenedMsg:
+		if msg.err != nil {
+			m.status = "Opening a tab failed: " + msg.err.Error()
+		} else {
+			m.status = "Opened in a new tab"
 		}
 		return m, m.refreshCmd()
 	case previewAnimMsg:
@@ -926,7 +955,7 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.detail = true
 		case "enter":
 			m.previewOpen = false
-			return m, m.resumeSelected()
+			return m, m.openSelectedInTab()
 		}
 		return m, nil
 	}
@@ -988,7 +1017,10 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.selected() != nil {
 			m.detail = true
 		}
-	case " ", "space":
+	case " ", "space", "enter":
+		// Quick Look is the board's main interaction: enter goes where the
+		// eye already went. Going to the session itself is the heavier,
+		// rarer act — ctrl+enter here, or enter from inside Quick Look.
 		return m, m.openQuickLook()
 	case "r":
 		m.loading = true
@@ -997,8 +1029,8 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.archiveSelected()
 	case "ctrl+x":
 		m.dismissSelected()
-	case "enter":
-		return m, m.resumeSelected()
+	case "ctrl+enter":
+		return m, m.openSelectedInTab()
 	}
 	return m, nil
 }
@@ -1722,6 +1754,46 @@ func (m *Model) archiveSelected() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return archiveMsg{id: session.ID, err: m.adapter.Archive(ctx, session)}
+	}
+}
+
+// openSelectedInTab takes the selected session to a new tab of the
+// surrounding terminal: attach when it lives in a tmux pane, the agent's own
+// resume otherwise — either way the board keeps its window, which is what
+// makes it a console rather than a launcher. Terminals the board cannot ask
+// for a tab fall back to the classic hand-over of this window.
+func (m *Model) openSelectedInTab() tea.Cmd {
+	selected := m.selected()
+	if selected == nil || selected.Archived {
+		return nil
+	}
+	if selected.PID != 0 && selected.TmuxPane == "" {
+		m.status = "Session is already open in another terminal"
+		return nil
+	}
+	if m.opener == nil {
+		return m.resumeSelected()
+	}
+	var command []string
+	if selected.TmuxPane != "" {
+		// A fresh tab's shell is never inside tmux, so the way in is always
+		// attach — never switch-client — with the session's window and pane
+		// selected first so the agent is what lands on screen.
+		pane := selected.TmuxPane
+		command = []string{
+			"tmux",
+			"select-window", "-t", pane,
+			";", "select-pane", "-t", pane,
+			";", "attach", "-t", pane,
+		}
+	} else {
+		name, args := m.adapter.ResumeCommand(*selected)
+		command = append([]string{name}, args...)
+	}
+	opener, dir := m.opener, selected.CWD
+	m.status = "Opening in a new tab…"
+	return func() tea.Msg {
+		return tabOpenedMsg{err: opener.OpenTab(dir, command)}
 	}
 }
 
@@ -2701,16 +2773,16 @@ func (m *Model) footerHeight() int {
 // footer names the views, the composer and Quick Look each carry their own
 // hints — and a wall of every binding reads as none of them.
 func (m *Model) shortcutHelpLines() []string {
-	const wide = "↑↓←→ move · enter open · space quick look · n new task" +
-		" · / search · a archive · ctrl+x ×2 dismiss · q quit"
+	const wide = "↑↓←→ move · enter quick look · ctrl+enter open in a tab" +
+		" · n new task · / search · a archive · ctrl+x ×2 dismiss · q quit"
 	// One padding column on the left, and one spare on the right so the
 	// line never kisses the terminal's edge.
 	if lipgloss.Width(wide) <= m.width-2 {
 		return []string{wide}
 	}
 	return []string{
-		"↑↓←→ move · enter open · space quick look · n new task",
-		"/ search · a archive · ctrl+x ×2 dismiss · q quit",
+		"↑↓←→ move · enter quick look · ctrl+enter open in a tab",
+		"n new task · / search · a archive · ctrl+x ×2 dismiss · q quit",
 	}
 }
 
@@ -2978,9 +3050,9 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 			Foreground(lipgloss.Color("#FBBF24")).
 			Render(truncate(typing, contentWidth))
 	case m.paneView:
-		hints = "i type · t transcript · enter attach · esc close"
+		hints = "i type · t transcript · enter open in tab · esc close"
 	case selected != nil && m.canMirrorPane(*selected):
-		hints = "t live pane · ↑↓ scroll · enter attach · esc close"
+		hints = "t live pane · ↑↓ scroll · enter open in tab · esc close"
 	}
 	activity := m.previewActivityLine()
 	if activity == "" {
