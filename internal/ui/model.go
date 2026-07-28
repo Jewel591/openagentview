@@ -1822,9 +1822,49 @@ func (m *Model) cardsForColumn(index int) []agent.Session {
 		}
 	}
 	sort.SliceStable(result, func(i, j int) bool {
-		return result[i].UpdatedAt.After(result[j].UpdatedAt)
+		a, b := result[i], result[j]
+		if ra, rb := statusRank(a.RuntimeStatus), statusRank(b.RuntimeStatus); ra != rb {
+			return ra < rb
+		}
+		at, bt := sessionSortTime(a), sessionSortTime(b)
+		if !at.Equal(bt) {
+			return at.After(bt)
+		}
+		return a.ID < b.ID
 	})
 	return result
+}
+
+// statusRank is the Status board's column order replayed inside a mixed
+// column, so the Projects grouping reads the same way the board does:
+// what wants a person, then what is working, then what has settled.
+func statusRank(status agent.RuntimeStatus) int {
+	switch status {
+	case agent.StatusNeedsYou:
+		return 0
+	case agent.StatusRunning:
+		return 1
+	case agent.StatusError:
+		return 3
+	default:
+		return 2
+	}
+}
+
+// sessionSortTime is the moment a card holds its place by. A session that
+// is still an agent's concern sorts by when it started: its log grows on
+// every poll, and cards trading places while agents work made the running
+// column unreadable. A settled session sorts by when it last did anything,
+// which is fixed until something happens to it — so either way, a refresh
+// alone never reorders the board.
+func sessionSortTime(session agent.Session) time.Time {
+	switch session.RuntimeStatus {
+	case agent.StatusRunning, agent.StatusNeedsYou:
+		if !session.CreatedAt.IsZero() {
+			return session.CreatedAt
+		}
+	}
+	return session.UpdatedAt
 }
 
 func (m *Model) sessionVisible(session agent.Session, query string) bool {
@@ -2423,13 +2463,15 @@ func (m *Model) renderComposer() string {
 	if m.composing {
 		tagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4B5FD"))
 	}
-	// The directory rides next to the agent as the task's second address:
-	// who runs it, then where. Shown as the project's name, since the full
-	// path would crowd out the input it is only labelling; @ in the input
-	// is how it changes.
-	dirTag := projectName(m.currentComposeDir())
-	tag := tagStyle.Render("["+agentTag+"]") + " " +
-		tagStyle.Render("["+dirTag+"]") + " "
+	// The directory shows only once an @ has pointed the task somewhere
+	// other than the board's own — that pick would otherwise be invisible,
+	// since accepting it strips the token from the text. It wears the @ it
+	// was picked with; a second bracketed tag read as a second agent.
+	tag := tagStyle.Render("["+agentTag+"]") + " "
+	dir := filepath.Clean(m.currentComposeDir())
+	if dir != filepath.Clean(m.workdir) {
+		tag += tagStyle.Render("@"+projectName(dir)) + " "
+	}
 
 	prompt := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#A78BFA")).

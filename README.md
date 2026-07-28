@@ -117,8 +117,9 @@ without losing it. Typing `@` picks where the task starts: a menu offers the
 directory openagentview was launched from and every project that already has
 a session on the board, filtered as you type, and a query starting with `/`
 or `~` completes filesystem paths shell-style instead (`Tab` completes,
-`Enter` picks, `Esc` keeps the text as typed). The picked directory rides
-next to the agent tag and survives the draft being put down. The composer
+`Enter` picks, `Esc` keeps the text as typed). A directory picked this way
+shows as `@name` next to the agent tag until the task starts, and survives
+the draft being put down; the board's own directory goes unlabelled. The composer
 appears only when tmux and at least one agent CLI are installed.
 
 Quick Look on a session running in a tmux pane opens typing into that agent.

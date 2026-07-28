@@ -2427,6 +2427,77 @@ func TestComposerAtInsideAWordIsNotAMention(t *testing.T) {
 	}
 }
 
+func TestRunningCardsHoldTheirOrderAcrossRefreshes(t *testing.T) {
+	now := time.Now()
+	running := func(id string, created, updated time.Time) agent.Session {
+		return agent.Session{
+			ID:            id,
+			Agent:         "claude",
+			CWD:           "/projects/alpha",
+			RuntimeStatus: agent.StatusRunning,
+			CreatedAt:     created,
+			UpdatedAt:     updated,
+			RecencyAt:     updated,
+		}
+	}
+	m := &Model{sessions: []agent.Session{
+		running("older-start", now.Add(-2*time.Hour), now),
+		running("newer-start", now.Add(-time.Hour), now.Add(-time.Second)),
+	}}
+
+	order := func() []string {
+		var ids []string
+		for _, card := range m.cardsForColumn(1) {
+			ids = append(ids, card.ID)
+		}
+		return ids
+	}
+	first := order()
+	if len(first) != 2 || first[0] != "newer-start" {
+		t.Fatalf("running cards sorted %v, want the newer session first", first)
+	}
+
+	// The next poll sees the other session write last. Order is a session's
+	// place on the board, not a race between their logs — it must not move.
+	m.sessions[0].UpdatedAt = now.Add(-time.Second)
+	m.sessions[1].UpdatedAt = now.Add(time.Second)
+	if second := order(); second[0] != first[0] || second[1] != first[1] {
+		t.Fatalf("a refresh reordered running cards from %v to %v", first, second)
+	}
+}
+
+func TestProjectColumnsLeadWithWhatWantsAPerson(t *testing.T) {
+	now := time.Now()
+	m := &Model{group: groupProject, sessions: []agent.Session{
+		{
+			ID: "settled", Agent: "claude", CWD: "/projects/alpha",
+			RuntimeStatus: agent.StatusIdle,
+			CreatedAt:     now.Add(-time.Minute), UpdatedAt: now, RecencyAt: now,
+		},
+		{
+			ID: "working", Agent: "claude", CWD: "/projects/alpha",
+			RuntimeStatus: agent.StatusRunning,
+			CreatedAt:     now.Add(-2 * time.Hour), UpdatedAt: now.Add(-time.Minute),
+			RecencyAt: now.Add(-time.Minute),
+		},
+		{
+			ID: "waiting", Agent: "claude", CWD: "/projects/alpha",
+			RuntimeStatus: agent.StatusNeedsYou,
+			CreatedAt:     now.Add(-3 * time.Hour), UpdatedAt: now.Add(-time.Hour),
+			RecencyAt: now.Add(-time.Hour),
+		},
+	}}
+
+	cards := m.cardsForColumn(0)
+	if len(cards) != 3 {
+		t.Fatalf("project column holds %d cards, want 3", len(cards))
+	}
+	if cards[0].ID != "waiting" || cards[1].ID != "working" || cards[2].ID != "settled" {
+		t.Fatalf("project column ordered %s, %s, %s — want needs-you, running, idle",
+			cards[0].ID, cards[1].ID, cards[2].ID)
+	}
+}
+
 func TestComposerDirSurvivesTheDraftBeingPutDown(t *testing.T) {
 	starter := &fakeStarter{}
 	m := composerModel(starter)
