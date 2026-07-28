@@ -567,9 +567,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		return m.handlePaste(msg.Content)
 	case animTickMsg:
-		// The pulse runs only while something is actually working, and rests
-		// while Quick Look owns the screen; a refresh starts it back up.
-		if m.previewOpen || !m.anyRunningVisible() {
+		// The pulse runs only while the list is showing something that is
+		// actually working — kanban never draws the marker, so animating it
+		// there would be redrawing the board for nothing — and rests while
+		// Quick Look owns the screen. A refresh or a switch back to the
+		// list starts it up again.
+		if m.previewOpen || m.layout != layoutList || !m.anyRunningVisible() {
 			m.animating = false
 			return m, nil
 		}
@@ -591,11 +594,13 @@ func animTickCmd() tea.Cmd {
 	})
 }
 
-// startAnimIfNeeded arms the pulse after a refresh when something is running
-// and the pulse is not already going — the animating flag is what keeps two
-// refreshes from stacking two timers.
+// startAnimIfNeeded arms the pulse — after a refresh, or after the layout
+// switches to the list — when the list is up, something is running, and the
+// pulse is not already going; the animating flag is what keeps two callers
+// from stacking two timers.
 func (m *Model) startAnimIfNeeded() tea.Cmd {
-	if m.animating || m.previewOpen || !m.anyRunningVisible() {
+	if m.animating || m.previewOpen || m.layout != layoutList ||
+		!m.anyRunningVisible() {
 		return nil
 	}
 	m.animating = true
@@ -731,6 +736,7 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		m.setLayout(layoutKanban)
 	case clickLayoutList:
 		m.setLayout(layoutList)
+		return m, m.startAnimIfNeeded()
 	case clickSearch:
 		m.searching = true
 	case clickComposer:
@@ -963,6 +969,7 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.toggleGroup()
 	case "v":
 		m.toggleLayout()
+		return m, m.startAnimIfNeeded()
 	case "?":
 		m.helpOpen = true
 	case "/", "s", "ctrl+k":

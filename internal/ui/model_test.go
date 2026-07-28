@@ -2532,7 +2532,7 @@ func TestRunningPulseArmsAndStandsDown(t *testing.T) {
 		RuntimeStatus: agent.StatusRunning,
 		CreatedAt:     now, UpdatedAt: now, RecencyAt: now,
 	}
-	m := &Model{}
+	m := &Model{layout: layoutList}
 
 	// A refresh that finds a running session arms the pulse; the next
 	// refresh must not stack a second timer on top of it.
@@ -2551,11 +2551,37 @@ func TestRunningPulseArmsAndStandsDown(t *testing.T) {
 		t.Fatalf("tick advanced frame %d→%d with cmd=%v", frame, m.animFrame, cmd)
 	}
 
+	// Kanban never draws the marker, so switching away stands the pulse
+	// down — animating a layout that cannot show it is redraw for nothing.
+	m.layout = layoutKanban
+	if _, cmd = m.Update(animTickMsg(time.Now())); m.animating || cmd != nil {
+		t.Fatalf("tick on kanban left animating=%v cmd=%v", m.animating, cmd)
+	}
+
+	// Switching back to the list brings the pulse with it.
+	press(t, m, tea.KeyPressMsg{Code: 'v', Text: "v"})
+	if m.layout != layoutList || !m.animating {
+		t.Fatalf("v back to the list left layout=%v animating=%v", m.layout, m.animating)
+	}
+
 	// With nothing running anymore the pulse stands down instead of
 	// spinning an idle board forever.
 	m.sessions[0].RuntimeStatus = agent.StatusIdle
 	if _, cmd = m.Update(animTickMsg(time.Now())); m.animating || cmd != nil {
 		t.Fatalf("tick with nothing running left animating=%v cmd=%v", m.animating, cmd)
+	}
+}
+
+func TestRunningPulseStaysOffTheKanban(t *testing.T) {
+	now := time.Now()
+	m := &Model{}
+	_, cmd := m.Update(refreshMsg{sessions: []agent.Session{{
+		ID: "r", Agent: "claude", CWD: "/projects/alpha",
+		RuntimeStatus: agent.StatusRunning,
+		CreatedAt:     now, UpdatedAt: now, RecencyAt: now,
+	}}})
+	if m.animating || cmd != nil {
+		t.Fatalf("kanban armed the pulse: animating=%v cmd=%v", m.animating, cmd)
 	}
 }
 
