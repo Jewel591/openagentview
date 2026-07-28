@@ -2469,7 +2469,7 @@ func listDescription(session agent.Session) string {
 	}
 	location := session.Agent + " · " + projectName(session.CWD)
 	if session.TmuxTarget != "" {
-		location += " · ⧉ " + session.TmuxTarget
+		location += " · tmux " + session.TmuxTarget
 	} else if session.Branch != "" {
 		location += " · " + session.Branch
 	}
@@ -2568,7 +2568,7 @@ func (m *Model) renderCard(s agent.Session, width int, selected bool, color stri
 	if s.TmuxTarget != "" {
 		// Where a session is attached is what tells a reader they can walk over
 		// to it, so it outranks the branch when the line has to be cut.
-		location = s.Agent + " · ⧉ " + s.TmuxTarget + " · " + filepath.Base(s.CWD)
+		location = s.Agent + " · tmux " + s.TmuxTarget + " · " + filepath.Base(s.CWD)
 	}
 	meta := truncate(location, max(8, width-4))
 	age := relativeTime(s.UpdatedAt)
@@ -3026,8 +3026,23 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 	case selected != nil && m.canMirrorPane(*selected):
 		hints = "t live pane · ↑↓ scroll · enter open in tab · esc close"
 	}
+	var note string
+	if selected != nil && !m.paneView && !m.canMirrorPane(*selected) &&
+		m.previewLive() {
+		// A live session without a pane is the one case where the missing
+		// ability to type needs explaining: a finished transcript reads as a
+		// record on its own, but a running one looks like it should answer.
+		// The note is kept apart from the key hints because it must outlive
+		// them: a live session always has an activity line, and behind one the
+		// hints are dropped whole — keys can be learned once, the explanation
+		// cannot.
+		note = "view only (not in tmux)"
+	}
 	activity := m.previewActivityLine()
 	if activity == "" {
+		if note != "" {
+			hints = note + " · " + hints
+		}
 		return mutedStyle.Render(truncate(hints, contentWidth))
 	}
 	activity = truncate(activity, contentWidth)
@@ -3035,6 +3050,13 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 		Foreground(lipgloss.Color("#34D399")).
 		Render(activity)
 	remaining := contentWidth - utf8.RuneCountInString(activity) - 3
+	if note != "" {
+		if remaining < utf8.RuneCountInString(note) {
+			return rendered
+		}
+		rendered += mutedStyle.Render(" · " + note)
+		remaining -= utf8.RuneCountInString(note) + 3
+	}
 	if remaining < utf8.RuneCountInString(hints) {
 		return rendered
 	}

@@ -185,6 +185,51 @@ func TestQuickLookFallsBackToTheTranscriptWithoutAPane(t *testing.T) {
 	}
 }
 
+// The view-only note explains a state where the key hints only name keys, so
+// when the activity line of a live session squeezes the footer, the note must
+// survive the width that drops the hints.
+func TestViewOnlyNoteOutlivesTheKeyHints(t *testing.T) {
+	m := tmuxModel(&fakePanes{})
+	m.sessions[0].TmuxPane = ""
+	m.sessions[0].TmuxTarget = ""
+	m.openQuickLook()
+	m.previewLoading = false
+	m.previewStatus = agent.StatusRunning
+	m.previewActivity = agent.Activity{Label: "calling Read"}
+
+	narrow := m.renderQuickLookFooter(60)
+	if !strings.Contains(narrow, "view only (not in tmux)") {
+		t.Fatalf("narrow footer lost the view-only note: %q", narrow)
+	}
+	if strings.Contains(narrow, "pgup") {
+		t.Fatalf("key hints outranked the note at a width that fits only one: %q", narrow)
+	}
+
+	wide := m.renderQuickLookFooter(160)
+	if !strings.Contains(wide, "view only (not in tmux)") ||
+		!strings.Contains(wide, "pgup") {
+		t.Fatalf("a wide footer should carry the note and the hints: %q", wide)
+	}
+}
+
+// A live session mirrored from its pane can be typed into, so its transcript
+// side must not claim to be view-only.
+func TestMirrorableTranscriptCarriesNoViewOnlyNote(t *testing.T) {
+	m := tmuxModel(&fakePanes{})
+	m.openQuickLook()
+	m.togglePaneView()
+	m.previewLoading = false
+	m.previewStatus = agent.StatusRunning
+
+	footer := m.renderQuickLookFooter(160)
+	if strings.Contains(footer, "view only") {
+		t.Fatalf("a mirrorable session was marked view-only: %q", footer)
+	}
+	if !strings.Contains(footer, "t live pane") {
+		t.Fatalf("the transcript of a mirrorable session should offer the pane: %q", footer)
+	}
+}
+
 func TestTypingIntoAPaneSendsTextAndReturnSeparately(t *testing.T) {
 	panes := &fakePanes{lines: []string{"waiting"}}
 	m := tmuxModel(panes)
