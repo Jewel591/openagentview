@@ -86,14 +86,6 @@ func (m *Multi) ResumeCommand(session Session) (string, []string) {
 	return adapter.ResumeCommand(session)
 }
 
-func (m *Multi) Archive(ctx context.Context, session Session) error {
-	adapter, err := m.adapterFor(session)
-	if err != nil {
-		return err
-	}
-	return adapter.Archive(ctx, session)
-}
-
 func (m *Multi) adapterFor(session Session) (Adapter, error) {
 	for _, adapter := range m.adapters {
 		if adapter.Name() == session.Agent {

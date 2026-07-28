@@ -1,7 +1,7 @@
 // Package dismiss remembers which sessions the board has been asked to stop
 // showing. A dismissal is a fact about this board, not about any agent, so it
 // lives in openagentview's own state file: the agents' stores stay read-only,
-// and an agent without an archive verb still gets a way off the board.
+// and every agent gets the same way off the board.
 package dismiss
 
 import (

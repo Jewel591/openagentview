@@ -37,10 +37,6 @@ func (a *stubAdapter) ResumeCommand(Session) (string, []string) {
 	return a.name, []string{"resume"}
 }
 
-func (a *stubAdapter) Archive(context.Context, Session) error {
-	return nil
-}
-
 func TestMultiMergesSessionsNewestFirst(t *testing.T) {
 	now := time.Now()
 	codex := &stubAdapter{

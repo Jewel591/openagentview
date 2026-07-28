@@ -147,15 +147,6 @@ func (a *Adapter) NewSessionCommand(prompt string) (string, []string) {
 	return "codex", []string{prompt}
 }
 
-func (a *Adapter) Archive(ctx context.Context, s agent.Session) error {
-	cmd := exec.CommandContext(ctx, "codex", "archive", s.ID)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("codex archive: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
 func latestStateDB(home string) (string, error) {
 	matches, err := filepath.Glob(filepath.Join(home, "state_*.sqlite"))
 	if err != nil {

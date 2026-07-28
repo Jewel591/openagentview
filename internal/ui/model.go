@@ -161,11 +161,6 @@ type paneSentMsg struct {
 	err        error
 }
 
-type archiveMsg struct {
-	id  string
-	err error
-}
-
 // sessionStartedMsg reports the composer's attempt to start a fresh agent in a
 // tmux session of its own. The prompt rides along so a failed attempt can hand
 // the draft back instead of losing it with the session that never started.
@@ -545,13 +540,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tickCmd()
 		}
 		return m, tea.Batch(m.refreshCmd(), tickCmd())
-	case archiveMsg:
-		if msg.err != nil {
-			m.status = "Archive failed: " + msg.err.Error()
-		} else {
-			m.status = "Session archived"
-		}
-		return m, m.refreshCmd()
 	case sessionStartedMsg:
 		if msg.err != nil {
 			m.status = "Start failed: " + msg.err.Error()
@@ -1025,8 +1013,6 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.loading = true
 		return m, m.refreshCmd()
-	case "a":
-		return m, m.archiveSelected()
 	case "ctrl+x":
 		m.dismissSelected()
 	case "ctrl+enter":
@@ -1036,9 +1022,9 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // dismissSelected takes the selected session off the board on the second
-// ctrl+x, remembered in the board's own state rather than the agent's. Unlike
-// archiving this works for every agent and every status: it changes what the
-// board shows, not what the agent has.
+// ctrl+x, remembered in the board's own state rather than the agent's. It
+// works for every agent and every status: it changes what the board shows,
+// not what the agent has.
 func (m *Model) dismissSelected() {
 	selected := m.selected()
 	if selected == nil {
@@ -1735,25 +1721,6 @@ func (m *Model) startComposedSession() tea.Cmd {
 			prompt: prompt,
 			err:    err,
 		}
-	}
-}
-
-func (m *Model) archiveSelected() tea.Cmd {
-	selected := m.selected()
-	if selected == nil || selected.Archived {
-		return nil
-	}
-	if selected.RuntimeStatus == agent.StatusRunning ||
-		selected.RuntimeStatus == agent.StatusNeedsYou {
-		m.status = "Stop the active session before archiving it"
-		return nil
-	}
-	session := *selected
-	m.status = "Archiving…"
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return archiveMsg{id: session.ID, err: m.adapter.Archive(ctx, session)}
 	}
 }
 
@@ -2779,7 +2746,7 @@ func (m *Model) footerHeight() int {
 // hints — and a wall of every binding reads as none of them.
 func (m *Model) shortcutHelpLines() []string {
 	const wide = "↑↓←→ move · enter quick look · ctrl+enter open in a tab" +
-		" · n new task · / search · a archive · ctrl+x ×2 dismiss · q quit"
+		" · n new task · / search · ctrl+x ×2 dismiss · q quit"
 	// One padding column on the left, and one spare on the right so the
 	// line never kisses the terminal's edge.
 	if lipgloss.Width(wide) <= m.width-2 {
@@ -2787,7 +2754,7 @@ func (m *Model) shortcutHelpLines() []string {
 	}
 	return []string{
 		"↑↓←→ move · enter quick look · ctrl+enter open in a tab",
-		"n new task · / search · a archive · ctrl+x ×2 dismiss · q quit",
+		"n new task · / search · ctrl+x ×2 dismiss · q quit",
 	}
 }
 

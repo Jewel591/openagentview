@@ -44,7 +44,6 @@ resume any session, or start a new one.
   a task description and opens it as a fresh agent — any installed one — in a
   detached tmux session of its own, which discovery then picks up like any
   other
-- Archives idle Codex sessions through the Codex CLI
 - Dismisses any session from the board with ctrl+x pressed twice, remembered
   in openagentview's own state file without touching the agent's store
 - Refreshes automatically without writing to any agent's private state
@@ -115,7 +114,7 @@ openagentview --codex-home /path/to/.codex \
 | `?` | Show or hide all shortcuts |
 | `/` / `s` | Search |
 | `n` | Describe a task and start it as a new tmux session |
-| `a` | Archive an idle session |
+| `Ctrl+X` twice | Dismiss the selected session from the board |
 | `r` | Refresh |
 | `q` | Quit |
 
@@ -164,9 +163,10 @@ read-only, and Grok's session directory is only ever read. Mutating actions go
 through the agent's own CLI. openagentview never writes to Codex SQLite rows,
 rollout JSONL files, or anything under `~/.grok`.
 
-Neither Grok nor Claude Code has an archive command — removing a session means
-deleting its transcript — so archiving one of their sessions is refused rather
-than mapped onto a destructive command.
+openagentview has no archive or delete action. Taking a session off the board
+is a dismissal, recorded in openagentview's own state file — no agent's
+transcript or store is ever modified, and sessions a Codex user archived
+through Codex itself simply stay off the board.
 
 ## Architecture
 

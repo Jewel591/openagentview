@@ -116,15 +116,6 @@ func (a *Adapter) NewSessionCommand(prompt string) (string, []string) {
 	return "grok", []string{prompt}
 }
 
-// Archive is unsupported: grok's only lifecycle verb is `sessions delete`,
-// which destroys the transcript instead of shelving it. Deleting on behalf of
-// an "archive" keystroke would be an unrecoverable surprise.
-func (a *Adapter) Archive(context.Context, agent.Session) error {
-	return errors.New(
-		"grok has no archive; `grok sessions delete <id>` deletes permanently",
-	)
-}
-
 func (a *Adapter) sessionsRoot() string {
 	return filepath.Join(a.home, "sessions")
 }

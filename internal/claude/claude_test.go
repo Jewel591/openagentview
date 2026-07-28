@@ -348,15 +348,6 @@ func TestResumeUsesTheSessionID(t *testing.T) {
 	}
 }
 
-// Claude Code has no archive verb, and its only way of removing a session
-// destroys the transcript.
-func TestArchiveIsRefusedRatherThanMappedOntoDeletion(t *testing.T) {
-	err := (&Adapter{}).Archive(context.Background(), agent.Session{ID: "abc"})
-	if err == nil {
-		t.Fatal("Archive() accepted a session Claude cannot archive")
-	}
-}
-
 func TestDiscoverReportsAMissingStore(t *testing.T) {
 	adapter, err := New(filepath.Join(t.TempDir(), "absent"))
 	if err != nil {
