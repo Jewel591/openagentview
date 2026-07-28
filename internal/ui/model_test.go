@@ -2416,6 +2416,33 @@ func TestComposerMenuCapHoldsForTrailingSlashPaths(t *testing.T) {
 	}
 }
 
+func TestPasteLandsInTheComposer(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModelWithProjects(starter)
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	m.Update(tea.PasteMsg{Content: "fix the flaky\r\nretry loop\tin @al"})
+
+	if m.composeText != "fix the flaky retry loop in @al" {
+		t.Fatalf("paste landed as %q", m.composeText)
+	}
+	// A pasted @token is a live mention like a typed one.
+	if got := m.composeMenuEntries(); len(got) != 1 || got[0] != "/projects/alpha" {
+		t.Fatalf("menu after pasting a mention offered %v", got)
+	}
+}
+
+func TestPasteLandsInTheSearchQuery(t *testing.T) {
+	m := composerModelWithProjects(&fakeStarter{})
+
+	press(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
+	m.Update(tea.PasteMsg{Content: "retry\nloop"})
+
+	if !m.searching || m.query != "retry loop" {
+		t.Fatalf("paste while searching left searching=%v query=%q", m.searching, m.query)
+	}
+}
+
 func TestComposerAtInsideAWordIsNotAMention(t *testing.T) {
 	m := composerModelWithProjects(&fakeStarter{})
 
