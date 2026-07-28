@@ -2309,15 +2309,15 @@ func (m *Model) renderHeader() string {
 
 func (m *Model) renderBoard() string {
 	columns := m.columns()
-	if len(columns) == 0 {
-		return ""
-	}
 	availableHeight := max(minBoardHeight, m.height-4-m.footerHeight()-m.composerHeight())
+	// Grouped by project there are no standing columns — a project only has
+	// one while a session is in it — so an empty board has no columns at all
+	// there, and the same empty state has to answer for both shapes.
 	total := 0
 	for i := range columns {
 		total += len(m.cardsForColumn(i))
 	}
-	if total == 0 {
+	if len(columns) == 0 || total == 0 {
 		return m.renderEmptyBoard(availableHeight)
 	}
 	if m.layout == layoutList {
@@ -2367,12 +2367,29 @@ func (m *Model) renderEmptyBoard(height int) string {
 	inner := max(8, m.width-6)
 	bright := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E2E8F0"))
 	hint := func(key, text string) string {
-		return ruleStyle.Render("│ ") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#94A3B8")).Render(key) +
-			mutedStyle.Render("  "+text)
+		// Cut rather than wrap: a wrapped hint is a row the height budget
+		// below did not account for.
+		return truncate(
+			ruleStyle.Render("│ ")+
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#94A3B8")).Render(key)+
+				mutedStyle.Render("  "+text),
+			inner,
+		)
 	}
 	var lines []string
-	if query := strings.TrimSpace(m.query); query != "" {
+	switch query := strings.TrimSpace(m.query); {
+	// Before the first discovery lands there is no answer yet, and the board
+	// must not give one: "no agents running" is a finding, and a scan that
+	// has not finished has found nothing at all.
+	case m.lastSync.IsZero():
+		lines = append(lines,
+			bright.Render("Looking for sessions…"),
+			"",
+			mutedStyle.Render(truncate(
+				"Reading tmux panes and agent logs.", inner,
+			)),
+		)
+	case query != "":
 		lines = append(lines,
 			bright.Render(truncate("Nothing matches "+query+".", inner)),
 			"",
@@ -2386,7 +2403,7 @@ func (m *Model) renderEmptyBoard(height int) string {
 		if !m.searching {
 			lines = append(lines, hint("/", "edit the query"))
 		}
-	} else {
+	default:
 		lines = append(lines,
 			bright.Render("No agents running."),
 			"",
@@ -2404,10 +2421,21 @@ func (m *Model) renderEmptyBoard(height int) string {
 		}
 		lines = append(lines, hint("r", "rescan now"))
 	}
+	// Height is a budget, not a floor: lipgloss pads a short block out to it
+	// but lets a tall one through, and a block that overruns pushes the
+	// composer and the footer off the bottom of the terminal. The lines are
+	// ordered most-important-first, so a short terminal simply keeps fewer.
+	pad := 1
+	if len(lines)+2 > height {
+		pad = 0
+	}
+	if budget := height - 2*pad; len(lines) > budget {
+		lines = lines[:max(1, budget)]
+	}
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Height(height).
-		Padding(1, 2).
+		Padding(pad, 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
@@ -2722,7 +2750,11 @@ func (m *Model) renderColumn(
 	if !roomy {
 		stride = compactCardHeight
 	}
-	capacity := max(1, (height-1)/stride)
+	// n cards laid on this stride occupy n*stride rows less the gap the last
+	// one does not need, under a header row: n*stride - (stride-cardHeight)
+	// <= height-1. Counting the trailing gap as spent would drop a card that
+	// fits exactly, and make the column scroll for nothing.
+	capacity := max(1, (height-1+stride-cardHeight)/stride)
 	start := 0
 	if index == m.column && m.row >= capacity {
 		start = m.row - capacity + 1
@@ -2799,10 +2831,6 @@ func (m *Model) renderCard(
 	selected bool,
 	color string,
 ) string {
-	borderColor := "#334155"
-	if selected {
-		borderColor = color
-	}
 	inner := max(8, width-cardChrome)
 
 	// A session nobody is waiting on and nothing is happening in gets no
@@ -2816,6 +2844,18 @@ func (m *Model) renderCard(
 	projectColor, titleColor := "#CBD5E1", "#F8FAFC"
 	if !live {
 		projectColor, titleColor = "#64748B", "#94A3B8"
+	}
+
+	// Selection is drawn on the border, and on a settled card it is drawn in
+	// gray: a board of nothing but idle sessions would otherwise always have
+	// one card wearing its group's color, which is the very thing the color
+	// is supposed to mean.
+	borderColor := "#334155"
+	if selected {
+		borderColor = color
+		if !live {
+			borderColor = "#94A3B8"
+		}
 	}
 
 	// The top line is who and where: the agent's badge, the project, and —
