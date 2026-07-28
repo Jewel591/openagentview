@@ -144,10 +144,17 @@ Once `Ctrl+]` has stopped typing:
 
 | Key | Action |
 | --- | --- |
+| `↑` / `↓`, `PgUp` / `PgDn`, `g` / `G` | Scroll the pane or transcript |
 | `t` | Switch between the live pane and the stored transcript |
 | `i` | Start typing again |
 | `Enter` | Open the session in a new terminal tab |
 | `Esc` / `Space` | Close Quick Look |
+
+Full-screen agent TUIs use the terminal's alternate screen, which tmux keeps
+only as a current frame rather than scrollback. Quick Look labels those mirrors
+`current screen only`; switch to the session transcript to read earlier
+conversation content. Ordinary tmux history is loaded in growing pages as it
+is needed, up to the pane's actual history limit.
 
 Opening a tab drives the terminal's own scripting interface — AppleScript
 for Ghostty, iTerm2 and Terminal.app (macOS asks once for automation

@@ -270,6 +270,56 @@ func TestClientMirrorsAndTypesIntoARealPane(t *testing.T) {
 	_ = client.SendKey(ctx, pane.ID, "C-c")
 }
 
+// Full-screen agent TUIs use the terminal alternate screen. Tmux exposes that
+// current frame but deliberately retains none of the rows it scrolled away,
+// even when capture-pane asks for more history.
+func TestCaptureReportsAnAlternateScreenWithoutHistory(t *testing.T) {
+	client := testClient(t)
+	ctx := context.Background()
+	start := client.command(
+		ctx,
+		"new-session", "-d", "-s", "t", "-x", "80", "-y", "12",
+	)
+	if out, err := start.CombinedOutput(); err != nil {
+		t.Fatalf("new-session: %v: %s", err, out)
+	}
+	panes, err := client.ListPanes(ctx)
+	if err != nil || len(panes) != 1 {
+		t.Fatalf("ListPanes() = %#v, %v, want one pane", panes, err)
+	}
+	pane := panes[0]
+	if err := client.SendText(
+		ctx,
+		pane.ID,
+		"printf '\\033[?1049h'; seq 1 40; sleep 47",
+	); err != nil {
+		t.Fatalf("SendText: %v", err)
+	}
+	if err := client.SendKey(ctx, pane.ID, "Enter"); err != nil {
+		t.Fatalf("SendKey: %v", err)
+	}
+
+	var screen Screen
+	waitFor(t, "the shell to enter its alternate screen", func() bool {
+		var captureErr error
+		screen, captureErr = client.Capture(ctx, pane.ID, 100)
+		return captureErr == nil && screen.AlternateScreen
+	})
+	if screen.HistorySize != 0 || screen.History != 0 {
+		t.Fatalf("alternate screen history = %d/%d, want none",
+			screen.History, screen.HistorySize)
+	}
+	if len(screen.Lines) > screen.Height {
+		t.Fatalf("alternate capture has %d rows for a %d-row pane",
+			len(screen.Lines), screen.Height)
+	}
+	for _, line := range screen.Lines {
+		if strings.TrimSpace(line) == "1" {
+			t.Fatal("alternate capture recovered a row scrolled off its frame")
+		}
+	}
+}
+
 func TestParseScreenKeepsContentWhenTheCursorLineIsMissing(t *testing.T) {
 	screen := parseScreen("7 3 1\nfirst\nsecond\n")
 	if len(screen.Lines) != 2 || screen.Lines[0] != "first" {
@@ -305,13 +355,16 @@ func TestCaptureReportsAMissingPane(t *testing.T) {
 	}
 }
 
-// The metadata line grew the pane's own size behind the cursor fields; a tmux
-// that reports all five must fill the size in, and one that stops at three
-// must still yield a usable cursor.
+// The metadata line grew pane size, history and alternate-screen state behind
+// the cursor fields. A current tmux fills them all; one that stops at three
+// still yields a usable cursor.
 func TestParseScreenReadsThePaneSize(t *testing.T) {
-	screen := parseScreen("7 3 1 120 40\nrow\n")
+	screen := parseScreen("7 3 1 120 40 900 1\nrow\n")
 	if screen.Width != 120 || screen.Height != 40 {
 		t.Fatalf("size = %dx%d, want 120x40", screen.Width, screen.Height)
+	}
+	if screen.HistorySize != 900 || !screen.AlternateScreen {
+		t.Fatalf("terminal state = %#v, want history and alternate screen", screen)
 	}
 	if screen.CursorX != 7 || screen.CursorY != 3 || !screen.CursorVisible {
 		t.Fatalf("cursor = %#v, want 7,3 visible", screen)
@@ -347,11 +400,11 @@ func TestNewSessionStartsDetachedAndSuffixesDuplicates(t *testing.T) {
 	ctx := context.Background()
 
 	// The command must reach the pane as an argv, not as space-joined words: a
-	// prompt with spaces and an apostrophe has to arrive as one argument.
-	// The compound command keeps sh alive as the pane's own process, so its
-	// argv can be read back; a lone command would be exec'd over it.
+	// prompt with spaces and an apostrophe has to arrive as one argument. Its
+	// output is the portable proof — the pane's own process may still be an
+	// outer fish wrapper whose ps display preserves the shell quoting.
 	name, err := client.NewSession(ctx, "fix: login", "", []string{
-		"sh", "-c", "sleep 47; true # don't split",
+		"sh", "-c", `printf "%s\n" "don't split"; sleep 47`,
 	}, 187, 44)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -372,24 +425,18 @@ func TestNewSessionStartsDetachedAndSuffixesDuplicates(t *testing.T) {
 		t.Fatalf("window size = %q, want the requested 187×44", got)
 	}
 
-	var panePID int
-	waitFor(t, "the session's command to start", func() bool {
-		panes, err := client.ListPanes(ctx)
-		if err != nil || len(panes) != 1 {
+	waitFor(t, "the quoted argument to arrive intact", func() bool {
+		screen, captureErr := client.Capture(ctx, name, 0)
+		if captureErr != nil {
 			return false
 		}
-		panePID = panes[0].PID
-		return panePID > 0
+		for _, line := range screen.Lines {
+			if strings.TrimSpace(line) == "don't split" {
+				return true
+			}
+		}
+		return false
 	})
-	out, err := exec.Command(
-		"ps", "-p", strconv.Itoa(panePID), "-o", "args=",
-	).Output()
-	if err != nil {
-		t.Fatalf("ps: %v", err)
-	}
-	if !strings.Contains(string(out), "don't split") {
-		t.Fatalf("pane argv = %q, want the quoted argument intact", out)
-	}
 
 	// The same description again is still a new task.
 	name, err = client.NewSession(ctx, "fix: login", "", []string{"sleep", "48"}, 0, 0)

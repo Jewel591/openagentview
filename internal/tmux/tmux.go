@@ -203,6 +203,10 @@ type Screen struct {
 	CursorX       int
 	CursorY       int
 	CursorVisible bool
+	// AlternateScreen is true while the pane's application is using the
+	// terminal alternate screen. Tmux retains no scrollback for that screen,
+	// so mirrors must treat Lines as a current frame rather than a transcript.
+	AlternateScreen bool
 	// Width and Height are the pane's own size. They are what a mirror has to
 	// be measured against: the widest captured line only says how much of the
 	// pane is in use right now, and sizing a window to that would resize it
@@ -218,7 +222,7 @@ type Screen struct {
 }
 
 const cursorFormat = "#{cursor_x} #{cursor_y} #{cursor_flag} " +
-	"#{pane_width} #{pane_height} #{history_size}"
+	"#{pane_width} #{pane_height} #{history_size} #{alternate_on}"
 
 // Capture returns the pane's visible screen, one string per row, with the
 // pane's own colours intact. This is the screen a person would see after
@@ -278,6 +282,9 @@ func parseScreen(output string) Screen {
 	}
 	if len(fields) >= 6 {
 		screen.HistorySize, _ = strconv.Atoi(fields[5])
+	}
+	if len(fields) >= 7 {
+		screen.AlternateScreen = fields[6] == "1"
 	}
 	return screen
 }
