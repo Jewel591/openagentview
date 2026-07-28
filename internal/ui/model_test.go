@@ -27,6 +27,7 @@ type previewAdapter struct {
 	status   agent.RuntimeStatus
 	activity agent.Activity
 	calls    int
+	limits   []int
 }
 
 func (a *previewAdapter) Name() string {
@@ -38,13 +39,15 @@ func (a *previewAdapter) Discover(context.Context, int) ([]agent.Session, error)
 }
 
 func (a *previewAdapter) Preview(
-	context.Context,
-	agent.Session,
-	int,
+	_ context.Context,
+	_ agent.Session,
+	limit int,
 ) (agent.Transcript, error) {
 	a.calls++
+	a.limits = append(a.limits, limit)
+	start := max(0, len(a.messages)-limit)
 	return agent.Transcript{
-		Messages: append([]agent.TranscriptMessage(nil), a.messages...),
+		Messages: append([]agent.TranscriptMessage(nil), a.messages[start:]...),
 		Status:   a.status,
 		Activity: a.activity,
 	}, nil
@@ -291,16 +294,25 @@ func TestMirrorScrollReachesTheScrollback(t *testing.T) {
 	}
 }
 
-// Alternate-screen TUIs give tmux only their current frame. The frame may be
-// a few rows taller than Quick Look's body, but scrolling past those rows must
-// never accumulate an invisible offset that has to be unwound later.
-func TestMirrorScrollClampsToAnAlternateScreen(t *testing.T) {
+// Alternate-screen TUIs give tmux only their current frame. Reaching the top
+// continues into the agent-owned transcript instead of presenting that tmux
+// boundary as the end of the conversation.
+func TestMirrorScrollContinuesPastAnAlternateScreenIntoTranscript(t *testing.T) {
 	lines := make([]string, 30)
 	for i := range lines {
 		lines[i] = "screen-" + strconv.Itoa(i)
 	}
+	messages := make([]agent.TranscriptMessage, 40)
+	for i := range messages {
+		messages[i] = agent.TranscriptMessage{
+			Role: agent.RoleAgent,
+			Text: "transcript-" + strconv.Itoa(i),
+		}
+	}
 	panes := &fakePanes{lines: lines, alternate: true}
 	m := tmuxModel(panes)
+	adapter := &previewAdapter{messages: messages}
+	m.adapter = adapter
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
 	settleQuickLook(m)
@@ -309,41 +321,169 @@ func TestMirrorScrollClampsToAnAlternateScreen(t *testing.T) {
 	if maxScroll <= 0 {
 		t.Fatal("test pane does not extend past the Quick Look body")
 	}
-	for range 100 {
-		_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	m.previewScrollBack = maxScroll
+	_, cmd := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if m.paneView {
+		t.Fatal("scrolling past the pane boundary did not enter the transcript")
 	}
-	if m.previewScrollBack != maxScroll {
-		t.Fatalf("overscroll = %d, want clamped maximum %d",
-			m.previewScrollBack, maxScroll)
+	if m.paneInput {
+		t.Fatal("the transcript kept forwarding keys to the pane")
+	}
+	if !m.previewTranscriptReturnsToPane {
+		t.Fatal("the automatic transcript did not remember its live-pane edge")
+	}
+	transcriptMessage := cmd()
+	transcript, ok := transcriptMessage.(previewLoadedMsg)
+	if !ok {
+		t.Fatalf("pane overflow produced %T, want previewLoadedMsg", transcriptMessage)
+	}
+	if transcript.limit != previewMessagePage {
+		t.Fatalf("first transcript page = %d messages, want %d",
+			transcript.limit, previewMessagePage)
+	}
+	_, _ = m.Update(transcript)
+	if m.previewScrollBack == 0 {
+		t.Fatal("the boundary wheel was lost while the transcript loaded")
 	}
 	if panes.captured[len(panes.captured)-1] != 0 {
 		t.Fatal("an alternate screen invented tmux history")
 	}
-	if !strings.Contains(m.View().Content, "current screen only") {
-		t.Fatal("the alternate-screen boundary was not explained")
+	view := m.View().Content
+	if !strings.Contains(view, "session transcript") ||
+		!strings.Contains(view, "live pane continues below") {
+		t.Fatal("the automatic source change was not explained")
 	}
 
-	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
-	want := max(0, maxScroll-wheelScrollLines)
-	if m.previewScrollBack != want {
-		t.Fatalf("first downward wheel moved to %d, want %d",
-			m.previewScrollBack, want)
+	_, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if !m.paneView {
+		t.Fatal("scrolling through the transcript bottom did not return live")
+	}
+	if !m.paneInput {
+		t.Fatal("returning live did not restore the pane's typing state")
+	}
+	liveMessage := cmd()
+	if _, ok := liveMessage.(paneLoadedMsg); !ok {
+		t.Fatalf("live return produced %T, want paneLoadedMsg", liveMessage)
 	}
 }
 
-func TestMirrorWithAShortScreenNeverAccumulatesScroll(t *testing.T) {
+func TestMirrorWithAShortAlternateScreenContinuesImmediately(t *testing.T) {
 	m := tmuxModel(&fakePanes{
 		lines:     []string{"the whole current screen"},
 		alternate: true,
 	})
+	m.adapter = &previewAdapter{messages: []agent.TranscriptMessage{
+		{Role: agent.RoleUser, Text: strings.Repeat("older request ", 20)},
+		{Role: agent.RoleAgent, Text: strings.Repeat("older answer ", 20)},
+	}}
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
 
-	for range 100 {
-		_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	_, cmd := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if m.paneView {
+		t.Fatal("a zero-overflow pane swallowed the first history gesture")
 	}
-	if m.previewScrollBack != 0 {
-		t.Fatalf("short-screen overscroll = %d, want 0", m.previewScrollBack)
+	loaded := cmd()
+	if _, ok := loaded.(previewLoadedMsg); !ok {
+		t.Fatalf("short pane overflow produced %T, want previewLoadedMsg", loaded)
+	}
+}
+
+func TestTranscriptLoadsOlderMessagesOnlyWhenItsTopIsCrossed(t *testing.T) {
+	messages := make([]agent.TranscriptMessage, 80)
+	for i := range messages {
+		messages[i] = agent.TranscriptMessage{
+			Role: agent.RoleAgent,
+			Text: "message-" + strconv.Itoa(i),
+		}
+	}
+	adapter := &previewAdapter{messages: messages}
+	m := tmuxModel(&fakePanes{})
+	m.adapter = adapter
+	m.sessions[0].TmuxPane = ""
+	m.sessions[0].TmuxTarget = ""
+
+	load := m.openQuickLook()
+	first := loadMsg(t, load).(previewLoadedMsg)
+	_, _ = m.Update(first)
+	if len(m.previewMessages) != previewMessagePage {
+		t.Fatalf("initial transcript messages = %d, want %d",
+			len(m.previewMessages), previewMessagePage)
+	}
+
+	m.previewScrollBack = m.previewMaxScrollBack()
+	_, cmd := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	secondMessage := cmd()
+	second, ok := secondMessage.(previewLoadedMsg)
+	if !ok {
+		t.Fatalf("first transcript expansion produced %T", secondMessage)
+	}
+	if second.limit != previewMessagePage*2 {
+		t.Fatalf("first expanded limit = %d, want %d",
+			second.limit, previewMessagePage*2)
+	}
+	_, duplicate := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if duplicate != nil {
+		t.Fatal("trackpad inertia launched a duplicate transcript expansion")
+	}
+	if m.previewMessageLimit != previewMessagePage*2 {
+		t.Fatalf("in-flight expansion grew again to %d", m.previewMessageLimit)
+	}
+	_, _ = m.Update(second)
+	if len(m.previewMessages) != previewMessagePage*2 {
+		t.Fatalf("expanded transcript messages = %d, want %d",
+			len(m.previewMessages), previewMessagePage*2)
+	}
+	start := max(
+		0,
+		len(m.previewLayout)-m.quickLookBodyHeight()-m.previewScrollBack,
+	)
+	if start == 0 {
+		t.Fatal("expanding older messages jumped to the oldest row of the new page")
+	}
+
+	m.previewScrollBack = m.previewMaxScrollBack()
+	_, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	third := cmd().(previewLoadedMsg)
+	_, _ = m.Update(third)
+	if len(adapter.limits) != 3 ||
+		adapter.limits[0] != 16 ||
+		adapter.limits[1] != 32 ||
+		adapter.limits[2] != 64 {
+		t.Fatalf("Preview limits = %v, want [16 32 64]", adapter.limits)
+	}
+}
+
+func TestTranscriptStopsRebuildingOnceTheOldestMessageIsKnown(t *testing.T) {
+	messages := make([]agent.TranscriptMessage, 20)
+	for i := range messages {
+		messages[i] = agent.TranscriptMessage{
+			Role: agent.RoleAgent,
+			Text: "message-" + strconv.Itoa(i),
+		}
+	}
+	adapter := &previewAdapter{messages: messages}
+	m := tmuxModel(&fakePanes{})
+	m.adapter = adapter
+	m.sessions[0].TmuxPane = ""
+	m.sessions[0].TmuxTarget = ""
+
+	load := m.openQuickLook()
+	_, _ = m.Update(loadMsg(t, load).(previewLoadedMsg))
+	m.previewScrollBack = m.previewMaxScrollBack()
+	_, cmd := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	_, _ = m.Update(cmd().(previewLoadedMsg))
+	if !m.previewTranscriptExhausted {
+		t.Fatal("a short expanded page did not mark the transcript exhausted")
+	}
+
+	m.previewScrollBack = m.previewMaxScrollBack()
+	_, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if cmd != nil {
+		t.Fatal("scroll inertia rebuilt a transcript whose oldest message is known")
+	}
+	if adapter.calls != 2 {
+		t.Fatalf("Preview calls = %d, want initial load plus one expansion", adapter.calls)
 	}
 }
 
@@ -539,6 +679,27 @@ func TestToggleSwapsBetweenPaneAndTranscript(t *testing.T) {
 	}
 	if _, ok := cmd().(paneLoadedMsg); !ok {
 		t.Fatal("switching back to the pane did not capture it")
+	}
+}
+
+func TestManualTranscriptStaysOpenAtItsBottom(t *testing.T) {
+	m := tmuxModel(&fakePanes{lines: []string{"live screen"}})
+	load := m.openQuickLook()
+	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
+	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
+
+	cmd := press(t, m, tea.KeyPressMsg{Code: 't', Text: "t"})
+	_, _ = m.Update(cmd().(previewLoadedMsg))
+	if m.previewTranscriptReturnsToPane {
+		t.Fatal("an explicit transcript toggle was marked as an automatic continuation")
+	}
+	m.previewScrollBack = 0
+	_, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if cmd != nil {
+		t.Fatal("the bottom of a manually selected transcript loaded the pane")
+	}
+	if m.paneView {
+		t.Fatal("the bottom of a manually selected transcript returned live")
 	}
 }
 
