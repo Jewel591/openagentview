@@ -207,17 +207,6 @@ func TestResumeCommandUsesResumeFlag(t *testing.T) {
 	}
 }
 
-func TestArchiveIsRefusedBecauseGrokOnlyDeletes(t *testing.T) {
-	adapter := &Adapter{home: t.TempDir()}
-	err := adapter.Archive(context.Background(), agent.Session{ID: "AAAA"})
-	if err == nil {
-		t.Fatal("Archive() succeeded, but grok can only delete a session")
-	}
-	if !strings.Contains(err.Error(), "delete") {
-		t.Fatalf("Archive() error = %q, want it to name the destructive command", err)
-	}
-}
-
 func TestDecodeWorkspaceRecoversThePath(t *testing.T) {
 	got := decodeWorkspace(filepath.Join("/root", "%2FUsers%2Fme%2Fcode"))
 	if got != "/Users/me/code" {

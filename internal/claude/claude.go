@@ -195,13 +195,6 @@ func (a *Adapter) NewSessionCommand(prompt string) (string, []string) {
 	return "claude", []string{prompt}
 }
 
-// Archive is unsupported: Claude Code has no archive verb, and its only way of
-// removing a session is deleting the transcript. Deleting on behalf of an
-// "archive" keystroke would be an unrecoverable surprise.
-func (a *Adapter) Archive(context.Context, agent.Session) error {
-	return errors.New("claude has no archive; its sessions are only ever deleted")
-}
-
 func (a *Adapter) projectsRoot() string {
 	return filepath.Join(a.home, "projects")
 }

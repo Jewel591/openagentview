@@ -77,5 +77,4 @@ type Adapter interface {
 	Discover(context.Context, int) ([]Session, error)
 	Preview(context.Context, Session, int) (Transcript, error)
 	ResumeCommand(Session) (string, []string)
-	Archive(context.Context, Session) error
 }

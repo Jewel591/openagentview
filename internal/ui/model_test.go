@@ -54,10 +54,6 @@ func (a *previewAdapter) ResumeCommand(agent.Session) (string, []string) {
 	return "", nil
 }
 
-func (a *previewAdapter) Archive(context.Context, agent.Session) error {
-	return nil
-}
-
 type fakePanes struct {
 	lines   []string
 	cursorX int

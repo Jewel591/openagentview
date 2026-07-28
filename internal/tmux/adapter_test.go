@@ -32,8 +32,6 @@ func (a *stubAdapter) ResumeCommand(s agent.Session) (string, []string) {
 	return "codex", []string{"resume", s.ID}
 }
 
-func (a *stubAdapter) Archive(context.Context, agent.Session) error { return nil }
-
 func TestAnnotateTagsSessionsWithTheirPane(t *testing.T) {
 	sessions := []agent.Session{
 		{ID: "in-tmux", PID: 999},
