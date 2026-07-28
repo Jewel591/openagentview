@@ -560,8 +560,47 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleClick(msg)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case tea.PasteMsg:
+		return m.handlePaste(msg.Content)
 	}
 	return m, nil
+}
+
+// handlePaste routes bracketed-paste text to whichever input holds the
+// keyboard, in the same precedence handleKey gives them. Terminals send
+// cmd+v as a paste event rather than keystrokes, so before this the board
+// silently dropped it — a prepared task description is exactly the kind of
+// text that arrives by paste.
+func (m *Model) handlePaste(text string) (tea.Model, tea.Cmd) {
+	if m.searching {
+		m.query += singleLine(text)
+		return m, nil
+	}
+	if m.composing {
+		m.composeText += singleLine(text)
+		m.composeTextEdited()
+		return m, nil
+	}
+	if m.previewOpen && m.paneInput {
+		// The mirrored agent gets the paste untouched: what its TUI does
+		// with newlines is its own contract.
+		return m, m.sendPaneText(text)
+	}
+	return m, nil
+}
+
+// singleLine folds pasted text into the one line the board's inputs hold:
+// line breaks and tabs become spaces, so a copied paragraph lands as a
+// prompt instead of leaving stray control characters in the input.
+func singleLine(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\r', '\n', '\t':
+			return ' '
+		}
+		return r
+	}, text)
 }
 
 // wheelScrollLines is how far one wheel notch moves the overlay. Three lines
