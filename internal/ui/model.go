@@ -2469,7 +2469,7 @@ func listDescription(session agent.Session) string {
 	}
 	location := session.Agent + " · " + projectName(session.CWD)
 	if session.TmuxTarget != "" {
-		location += " · ⧉ " + session.TmuxTarget
+		location += " · tmux " + session.TmuxTarget
 	} else if session.Branch != "" {
 		location += " · " + session.Branch
 	}
@@ -2568,7 +2568,7 @@ func (m *Model) renderCard(s agent.Session, width int, selected bool, color stri
 	if s.TmuxTarget != "" {
 		// Where a session is attached is what tells a reader they can walk over
 		// to it, so it outranks the branch when the line has to be cut.
-		location = s.Agent + " · ⧉ " + s.TmuxTarget + " · " + filepath.Base(s.CWD)
+		location = s.Agent + " · tmux " + s.TmuxTarget + " · " + filepath.Base(s.CWD)
 	}
 	meta := truncate(location, max(8, width-4))
 	age := relativeTime(s.UpdatedAt)
@@ -3025,6 +3025,11 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 		hints = "i type · t transcript · enter open in tab · esc close"
 	case selected != nil && m.canMirrorPane(*selected):
 		hints = "t live pane · ↑↓ scroll · enter open in tab · esc close"
+	case selected != nil && m.previewLive():
+		// A live session without a pane is the one case where the missing
+		// ability to type needs explaining: a finished transcript reads as a
+		// record on its own, but a running one looks like it should answer.
+		hints = "view only (not in tmux) · " + hints
 	}
 	activity := m.previewActivityLine()
 	if activity == "" {
