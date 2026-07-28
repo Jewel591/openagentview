@@ -331,12 +331,24 @@ func TestNewSessionStartsDetachedAndSuffixesDuplicates(t *testing.T) {
 	// argv can be read back; a lone command would be exec'd over it.
 	name, err := client.NewSession(ctx, "fix: login", "", []string{
 		"sh", "-c", "sleep 47; true # don't split",
-	})
+	}, 187, 44)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
 	if name != "fix-login" {
 		t.Fatalf("session name = %q, want the sanitized one", name)
+	}
+
+	// The requested size must land on the detached session: left to tmux it
+	// would be 80×24, and the board would mirror a small screen in a mostly
+	// empty overlay.
+	size, err := client.command(ctx, "display-message", "-p", "-t", name,
+		"#{window_width}×#{window_height}").Output()
+	if err != nil {
+		t.Fatalf("display-message: %v", err)
+	}
+	if got := strings.TrimSpace(string(size)); got != "187×44" {
+		t.Fatalf("window size = %q, want the requested 187×44", got)
 	}
 
 	var panePID int
@@ -359,7 +371,7 @@ func TestNewSessionStartsDetachedAndSuffixesDuplicates(t *testing.T) {
 	}
 
 	// The same description again is still a new task.
-	name, err = client.NewSession(ctx, "fix: login", "", []string{"sleep", "48"})
+	name, err = client.NewSession(ctx, "fix: login", "", []string{"sleep", "48"}, 0, 0)
 	if err != nil {
 		t.Fatalf("NewSession(duplicate): %v", err)
 	}
@@ -371,7 +383,7 @@ func TestNewSessionStartsDetachedAndSuffixesDuplicates(t *testing.T) {
 	// tmux's own numbering still gets the session started.
 	seen := map[string]bool{"fix-login": true, name: true}
 	for i := 3; i <= sessionNameAttempts+1; i++ {
-		name, err = client.NewSession(ctx, "fix: login", "", []string{"sleep", "49"})
+		name, err = client.NewSession(ctx, "fix: login", "", []string{"sleep", "49"}, 0, 0)
 		if err != nil {
 			t.Fatalf("NewSession(collision %d): %v", i, err)
 		}
@@ -387,7 +399,7 @@ func TestNewSessionStartsDetachedAndSuffixesDuplicates(t *testing.T) {
 }
 
 func TestNewSessionRefusesAnEmptyCommand(t *testing.T) {
-	if _, err := New().NewSession(context.Background(), "x", "", nil); err == nil {
+	if _, err := New().NewSession(context.Background(), "x", "", nil, 0, 0); err == nil {
 		t.Fatal("NewSession accepted an empty command")
 	}
 }

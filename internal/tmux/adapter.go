@@ -123,6 +123,7 @@ func (a *Adapter) NewSession(
 	ctx context.Context,
 	name, dir string,
 	command []string,
+	width, height int,
 ) (string, error) {
-	return a.client.NewSession(ctx, name, dir, command)
+	return a.client.NewSession(ctx, name, dir, command, width, height)
 }
