@@ -2168,3 +2168,284 @@ func TestFailedDismissLeavesTheSessionOnTheBoard(t *testing.T) {
 		t.Fatal("a dismissal that was never saved still hid the session")
 	}
 }
+
+func composerModelWithProjects(starter *fakeStarter) *Model {
+	m := composerModel(starter)
+	now := time.Now()
+	m.sessions = []agent.Session{
+		{
+			ID:            "older",
+			Agent:         "codex",
+			CWD:           "/projects/alpha",
+			RuntimeStatus: agent.StatusIdle,
+			UpdatedAt:     now.Add(-time.Hour),
+			RecencyAt:     now.Add(-time.Hour),
+		},
+		{
+			ID:            "newer",
+			Agent:         "claude",
+			CWD:           "/projects/beta",
+			RuntimeStatus: agent.StatusIdle,
+			UpdatedAt:     now,
+			RecencyAt:     now,
+		},
+	}
+	return m
+}
+
+func TestComposerMentionPicksAProject(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModelWithProjects(starter)
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "fix the bug @be")
+	if got := m.composeMenuEntries(); len(got) != 1 || got[0] != "/projects/beta" {
+		t.Fatalf("menu for @be offered %v, want just the matching project", got)
+	}
+
+	// Enter takes the pick rather than starting the session, and the token
+	// leaves the text: the directory is the task's address, not its words.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.currentComposeDir() != "/projects/beta" {
+		t.Fatalf("accepting the mention set the directory to %q", m.currentComposeDir())
+	}
+	if m.composeText != "fix the bug " {
+		t.Fatalf("accepting the mention left the text as %q", m.composeText)
+	}
+	if starter.dir != "" {
+		t.Fatal("enter on an open menu started the session")
+	}
+
+	typeText(t, m, "now")
+	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if msg := cmd().(sessionStartedMsg); msg.err != nil {
+		t.Fatalf("starting in a picked directory failed: %v", msg.err)
+	}
+	if starter.dir != "/projects/beta" {
+		t.Fatalf("session started in %q, want the picked project", starter.dir)
+	}
+	if starter.command[len(starter.command)-1] != "fix the bug now" {
+		t.Fatalf("session started with prompt %q", starter.command[len(starter.command)-1])
+	}
+}
+
+func TestComposerMentionMenuNavigates(t *testing.T) {
+	m := composerModelWithProjects(&fakeStarter{})
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@")
+
+	// A bare @ offers everywhere a task can start: the board's own
+	// directory first, then projects freshest first.
+	want := []string{"/projects/openagentview", "/projects/beta", "/projects/alpha"}
+	got := m.composeMenuEntries()
+	if len(got) != len(want) {
+		t.Fatalf("bare @ offered %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("bare @ offered %v, want %v", got, want)
+		}
+	}
+
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.currentComposeDir() != "/projects/beta" {
+		t.Fatalf("picking the second row set the directory to %q", m.currentComposeDir())
+	}
+}
+
+func TestComposerMentionCompletesPaths(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"alpha", "beta"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := composerModelWithProjects(&fakeStarter{})
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@"+root+"/al")
+
+	// Tab completes shell style: the directory fills the token, open at its
+	// end so the next segment can be typed straight away.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if want := "@" + filepath.Join(root, "alpha") + "/"; m.composeText != want {
+		t.Fatalf("tab completed to %q, want %q", m.composeText, want)
+	}
+
+	// A fully typed directory is offered as itself, so enter can accept it
+	// even though there is nothing below it to complete.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if want := filepath.Join(root, "alpha"); m.currentComposeDir() != want {
+		t.Fatalf("accepting the path set the directory to %q, want %q", m.currentComposeDir(), want)
+	}
+	if m.composeText != "" {
+		t.Fatalf("accepting the path left the text as %q", m.composeText)
+	}
+}
+
+func TestComposerMentionEscKeepsTheText(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModelWithProjects(starter)
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@beta")
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	if !m.composing {
+		t.Fatal("esc on an open menu put the whole composer down")
+	}
+	if len(m.composeMenuEntries()) != 0 {
+		t.Fatal("esc left the menu up")
+	}
+
+	// With the menu stood down the @ is literal text, and enter means what
+	// it always means: start the session.
+	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if msg := cmd().(sessionStartedMsg); msg.err != nil {
+		t.Fatalf("starting with a literal @ failed: %v", msg.err)
+	}
+	if starter.command[len(starter.command)-1] != "@beta" {
+		t.Fatalf("session started with prompt %q, want the literal text", starter.command[len(starter.command)-1])
+	}
+	if starter.dir != "/projects/openagentview" {
+		t.Fatalf("session started in %q, want the board's directory", starter.dir)
+	}
+}
+
+func TestComposerMentionWithNoMatchHoldsEnter(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModelWithProjects(starter)
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "task @zzz")
+	if got := m.composeMenuEntries(); len(got) != 0 {
+		t.Fatalf("a query matching nothing offered %v", got)
+	}
+
+	// The token still owns enter: starting now would ship the typo as prompt
+	// text and the task to the wrong directory.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if starter.dir != "" {
+		t.Fatal("enter on a matchless mention started the session")
+	}
+	if !m.composing || m.composeText != "task @zzz" {
+		t.Fatalf("holding enter disturbed the draft: composing=%v text=%q", m.composing, m.composeText)
+	}
+
+	// Esc is the deliberate way to keep the literal @, after which enter
+	// means what it always means.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if msg := cmd().(sessionStartedMsg); msg.err != nil {
+		t.Fatalf("starting after esc failed: %v", msg.err)
+	}
+	if starter.command[len(starter.command)-1] != "task @zzz" {
+		t.Fatalf("session started with prompt %q, want the literal text", starter.command[len(starter.command)-1])
+	}
+}
+
+func TestComposerMentionCompletesSpacedPaths(t *testing.T) {
+	root := t.TempDir()
+	spaced := filepath.Join(root, "My Project")
+	if err := os.Mkdir(spaced, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := composerModelWithProjects(&fakeStarter{})
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@"+root+"/My")
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+
+	if want := "@" + strings.ReplaceAll(spaced, " ", `\ `) + "/"; m.composeText != want {
+		t.Fatalf("tab completed to %q, want the space escaped as %q", m.composeText, want)
+	}
+	// The escaped space keeps the token in one piece, so the completed path
+	// is still the menu's answer and enter can take it.
+	if got := m.composeMenuEntries(); len(got) != 1 || got[0] != spaced {
+		t.Fatalf("menu after completing a spaced path offered %v", got)
+	}
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.currentComposeDir() != spaced {
+		t.Fatalf("accepting the spaced path set the directory to %q", m.currentComposeDir())
+	}
+}
+
+func TestComposerMenuFitsAShortTerminal(t *testing.T) {
+	m := composerModelWithProjects(&fakeStarter{})
+	m.height = 13
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@")
+
+	// 13 rows leave exactly one for the menu once the header, the board's
+	// own floor, the input line and the footer have taken theirs.
+	if rows := m.composeMenuRows(); len(rows) != 1 {
+		t.Fatalf("a 13-row terminal got %d menu rows", len(rows))
+	}
+	if got, room := m.composerHeight(), m.height-4-m.footerHeight()-minBoardHeight; got > room {
+		t.Fatalf("composer takes %d rows, more than the %d the terminal has spare", got, room)
+	}
+}
+
+func TestComposerMenuCapHoldsForTrailingSlashPaths(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := composerModelWithProjects(&fakeStarter{})
+	m.height = 13
+
+	// A trailing slash puts the directory itself in the menu before its
+	// children are listed; the single-row budget must hold from there too,
+	// and tab completing writes exactly this shape of query.
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@"+root+"/")
+
+	if got := m.composeMenuEntries(); len(got) != 1 {
+		t.Fatalf("a 13-row terminal got %d entries for a trailing-slash path", len(got))
+	}
+	if rows := m.composeMenuRows(); len(rows) != 1 {
+		t.Fatalf("a 13-row terminal got %d menu rows for a trailing-slash path", len(rows))
+	}
+	if got, room := m.composerHeight(), m.height-4-m.footerHeight()-minBoardHeight; got > room {
+		t.Fatalf("composer takes %d rows, more than the %d the terminal has spare", got, room)
+	}
+}
+
+func TestComposerAtInsideAWordIsNotAMention(t *testing.T) {
+	m := composerModelWithProjects(&fakeStarter{})
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "email a@beta")
+
+	if got := m.composeMenuEntries(); len(got) != 0 {
+		t.Fatalf("an @ inside a word opened the menu: %v", got)
+	}
+}
+
+func TestComposerDirSurvivesTheDraftBeingPutDown(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModel(starter)
+	m.sessions = []agent.Session{{
+		ID:            "one",
+		Agent:         "codex",
+		CWD:           "/projects/alpha",
+		RuntimeStatus: agent.StatusIdle,
+		UpdatedAt:     time.Now(),
+		RecencyAt:     time.Now(),
+	}}
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@alpha")
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+
+	if m.currentComposeDir() != "/projects/alpha" {
+		t.Fatalf("reopening the composer forgot the picked directory: %q", m.currentComposeDir())
+	}
+}

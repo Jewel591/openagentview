@@ -217,6 +217,18 @@ type Model struct {
 	composing    bool
 	composeText  string
 	composeAgent int
+	// composeDir is where the composed task will start, empty meaning the
+	// board's own working directory. It survives the composer being put down,
+	// the way the agent choice does: the next task usually goes where the
+	// last one went.
+	composeDir string
+	// composeMenuSel is the highlighted row of the @ completion menu, reset
+	// whenever the text changes since the entries under it change too.
+	composeMenuSel int
+	// composeMenuHidden is set when esc puts the menu away for the token
+	// being typed — the @ was literal text after all. Any edit brings the
+	// menu back, since new text is a new question.
+	composeMenuHidden bool
 
 	sessions           []agent.Session
 	group              boardGroup
@@ -714,23 +726,59 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// The composer owns the whole keyboard while it is focused: a task
 	// description is ordinary text, and "q" in one must not quit the board.
 	if m.composing {
+		active := m.composeMentionActive()
+		menu := m.composeMenuEntries()
 		switch stroke {
 		case "esc":
-			m.composing = false
+			if active {
+				// The @ was literal text after all; the menu steps aside and
+				// the next esc puts the composer down as usual.
+				m.composeMenuHidden = true
+			} else {
+				m.composing = false
+			}
 		case "enter":
+			if active {
+				// While an @ is being completed, enter means "take the pick"
+				// and nothing else. With no match it does nothing at all —
+				// starting the session now would ship the typo'd token as
+				// prompt text and the task to the wrong directory; esc is
+				// the deliberate way to keep a literal @.
+				if len(menu) > 0 {
+					m.acceptComposeMention(menu)
+				}
+				return m, nil
+			}
 			return m, m.startComposedSession()
 		case "tab":
-			m.composeAgent = (m.composeAgent + 1) % len(m.launchers)
+			if active {
+				if len(menu) > 0 {
+					m.completeComposeMention(menu)
+				}
+			} else {
+				m.composeAgent = (m.composeAgent + 1) % len(m.launchers)
+			}
+		case "up":
+			if len(menu) > 0 {
+				m.composeMenuSel = (m.composeMenuSel - 1 + len(menu)) % len(menu)
+			}
+		case "down":
+			if len(menu) > 0 {
+				m.composeMenuSel = (m.composeMenuSel + 1) % len(menu)
+			}
 		case "backspace":
 			if len(m.composeText) > 0 {
 				_, size := utf8.DecodeLastRuneInString(m.composeText)
 				m.composeText = m.composeText[:len(m.composeText)-size]
+				m.composeTextEdited()
 			}
 		case "ctrl+u":
 			m.composeText = ""
+			m.composeTextEdited()
 		default:
 			if key.Key().Text != "" {
 				m.composeText += key.Key().Text
+				m.composeTextEdited()
 			}
 		}
 		return m, nil
@@ -1298,6 +1346,247 @@ func (m *Model) canCompose() bool {
 	return m.starter != nil && len(m.launchers) > 0
 }
 
+// composeDirs is everywhere a composed task can start: the directory the
+// board was launched from, then every project a session already ran in,
+// freshest first. Like the Projects grouping, the list is derived from the
+// sessions on the board rather than configured — the places work happens are
+// already known, and a brand-new one is a cd away.
+func (m *Model) composeDirs() []string {
+	base := filepath.Clean(m.workdir)
+	latest := map[string]time.Time{}
+	for _, session := range m.sessions {
+		path := filepath.Clean(session.CWD)
+		if path == "." || path == base {
+			continue
+		}
+		if session.UpdatedAt.After(latest[path]) {
+			latest[path] = session.UpdatedAt
+		}
+	}
+	dirs := make([]string, 0, len(latest)+1)
+	dirs = append(dirs, base)
+	for path := range latest {
+		dirs = append(dirs, path)
+	}
+	sort.SliceStable(dirs[1:], func(i, j int) bool {
+		return latest[dirs[1+i]].After(latest[dirs[1+j]])
+	})
+	return dirs
+}
+
+// currentComposeDir is composeDirs' selection resolved to a path, falling
+// back to the board's own working directory when nothing was picked or the
+// picked project's sessions have since left the board.
+func (m *Model) currentComposeDir() string {
+	if m.composeDir != "" {
+		return m.composeDir
+	}
+	return m.workdir
+}
+
+// composeMenuMax bounds the completion menu: enough rows to pick from
+// without the board disappearing behind them.
+const composeMenuMax = 6
+
+// minBoardHeight is the floor the board area never gives up, menu or not —
+// composeMenuCap trims the menu against it so the two floors cannot add up
+// past the bottom of the terminal.
+const minBoardHeight = 5
+
+// composeTextEdited is every edit's bookkeeping: the entries under the menu
+// changed, so the highlight and a standing dismissal are both stale.
+func (m *Model) composeTextEdited() {
+	m.composeMenuSel = 0
+	m.composeMenuHidden = false
+}
+
+// composeMention is the @token being typed at the end of the composer: the
+// trailing run of non-space text when it opens with an @ that starts a word.
+// The composer only ever edits at its end, so the token under the cursor is
+// always the last one. An @ inside a word — an email address — is not a
+// mention. Spaces escaped shell-style (\ ) stay inside the token, which is
+// how a completed "My Project" survives to the next keystroke; the returned
+// query has the escapes resolved.
+func composeMention(text string) (start int, query string, ok bool) {
+	cut := 0
+	for i := len(text) - 1; i >= 0; i-- {
+		if (text[i] == ' ' || text[i] == '\t') && (i == 0 || text[i-1] != '\\') {
+			cut = i + 1
+			break
+		}
+	}
+	token := text[cut:]
+	if !strings.HasPrefix(token, "@") {
+		return 0, "", false
+	}
+	return cut, strings.ReplaceAll(token[1:], `\ `, " "), true
+}
+
+// composeMentionActive reports whether the composer is inside an @token the
+// menu should answer for — even one with no matches, since enter changing
+// meaning on an empty result would ship a typo to the wrong directory.
+func (m *Model) composeMentionActive() bool {
+	if !m.composing || m.composeMenuHidden {
+		return false
+	}
+	_, _, ok := composeMention(m.composeText)
+	return ok
+}
+
+// composeMenuCap is how many rows the menu may take on this terminal: up to
+// composeMenuMax, less whatever would push the board below its own minimum
+// height and the whole layout past the bottom of the screen.
+func (m *Model) composeMenuCap() int {
+	room := m.height - 4 - m.footerHeight() - 2 - minBoardHeight
+	return max(1, min(composeMenuMax, room))
+}
+
+// composeMenuEntries is what the @ being typed could mean, in the order the
+// menu shows them: projects off the board matched by name, or directories on
+// disk when the query reads as a path.
+func (m *Model) composeMenuEntries() []string {
+	if !m.composeMentionActive() {
+		return nil
+	}
+	_, query, _ := composeMention(m.composeText)
+	limit := m.composeMenuCap()
+	if strings.HasPrefix(query, "/") || strings.HasPrefix(query, "~") {
+		return completeDirs(query, limit)
+	}
+	needle := strings.ToLower(query)
+	var entries []string
+	for _, dir := range m.composeDirs() {
+		if strings.Contains(strings.ToLower(projectName(dir)), needle) ||
+			strings.Contains(strings.ToLower(dir), needle) {
+			entries = append(entries, dir)
+		}
+		if len(entries) == limit {
+			break
+		}
+	}
+	return entries
+}
+
+// completeDirs lists the directories a partial path could continue as, the
+// way a shell completes one: entries of the query's parent whose names start
+// with its last element, and the query's own directory first when it already
+// names one, so a fully typed path is accepted rather than completed further.
+func completeDirs(query string, limit int) []string {
+	expanded, ok := expandHome(query)
+	if !ok {
+		return nil
+	}
+	parent, prefix := filepath.Dir(expanded), filepath.Base(expanded)
+	var entries []string
+	if strings.HasSuffix(expanded, "/") {
+		parent, prefix = expanded, ""
+		if info, err := os.Stat(expanded); err == nil && info.IsDir() {
+			entries = append(entries, filepath.Clean(expanded))
+		}
+	}
+	if len(entries) >= limit {
+		return entries
+	}
+	listed, err := os.ReadDir(parent)
+	if err != nil {
+		return entries
+	}
+	for _, entry := range listed {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		// Dotdirs stay out of the way until asked for by their dot.
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(prefix, ".") {
+			continue
+		}
+		full := filepath.Join(parent, name)
+		if !entry.IsDir() {
+			// A symlink to a directory completes like the directory.
+			if info, err := os.Stat(full); err != nil || !info.IsDir() {
+				continue
+			}
+		}
+		entries = append(entries, full)
+		if len(entries) >= limit {
+			break
+		}
+	}
+	return entries
+}
+
+// expandHome resolves a leading ~ the way a shell does, and only the way a
+// shell does: bare ~ and ~/, not ~user.
+func expandHome(path string) (string, bool) {
+	if !strings.HasPrefix(path, "~") {
+		return path, true
+	}
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return "", false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false
+	}
+	if path == "~" {
+		return home + "/", true
+	}
+	return home + path[1:], true
+}
+
+// abbreviateHome is expandHome's inverse for display: paths under the home
+// directory read as ~/… so the menu spends its width on what differs.
+func abbreviateHome(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || home == "/" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	if strings.HasPrefix(path, home+"/") {
+		return "~" + path[len(home):]
+	}
+	return path
+}
+
+// acceptComposeMention resolves the @token to the highlighted entry: the task
+// will start there, and the token leaves the text — the directory is the
+// task's address, not part of its description.
+func (m *Model) acceptComposeMention(entries []string) {
+	start, _, ok := composeMention(m.composeText)
+	if !ok {
+		return
+	}
+	m.composeDir = filepath.Clean(entries[min(m.composeMenuSel, len(entries)-1)])
+	m.composeText = m.composeText[:start]
+	m.composeTextEdited()
+}
+
+// completeComposeMention is tab on the menu. A path query completes shell
+// style — the highlighted directory fills the token, open at its end for
+// drilling deeper — while a project query has nothing deeper to drill, so
+// tab accepts it outright.
+func (m *Model) completeComposeMention(entries []string) {
+	start, query, ok := composeMention(m.composeText)
+	if !ok {
+		return
+	}
+	if !strings.HasPrefix(query, "/") && !strings.HasPrefix(query, "~") {
+		m.acceptComposeMention(entries)
+		return
+	}
+	completed := entries[min(m.composeMenuSel, len(entries)-1)]
+	if strings.HasPrefix(query, "~") {
+		completed = abbreviateHome(completed)
+	}
+	// Spaces go back escaped, or the next keystroke's token parse would cut
+	// the path at "My Project"'s gap and the mention would fall apart.
+	completed = strings.ReplaceAll(completed, " ", `\ `)
+	m.composeText = m.composeText[:start] + "@" + completed + "/"
+	m.composeTextEdited()
+}
+
 // startComposedSession starts the described task as a fresh agent in a tmux
 // session of its own. The board takes it from there: discovery finds the new
 // session, and Quick Look can mirror it like any other pane.
@@ -1316,7 +1605,7 @@ func (m *Model) startComposedSession() tea.Cmd {
 	command := append([]string{name}, args...)
 	sessionName := tmux.SessionName(prompt)
 	starter := m.starter
-	dir := m.workdir
+	dir := m.currentComposeDir()
 	agentName := launcher.Agent
 	m.composing = false
 	m.composeText = ""
@@ -1748,7 +2037,7 @@ func (m *Model) renderBoard() string {
 	if len(columns) == 0 {
 		return ""
 	}
-	availableHeight := max(5, m.height-4-m.footerHeight()-m.composerHeight())
+	availableHeight := max(minBoardHeight, m.height-4-m.footerHeight()-m.composerHeight())
 	if m.layout == layoutList {
 		return m.renderList(columns, availableHeight)
 	}
@@ -2134,7 +2423,13 @@ func (m *Model) renderComposer() string {
 	if m.composing {
 		tagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4B5FD"))
 	}
-	tag := tagStyle.Render("["+agentTag+"]") + " "
+	// The directory rides next to the agent as the task's second address:
+	// who runs it, then where. Shown as the project's name, since the full
+	// path would crowd out the input it is only labelling; @ in the input
+	// is how it changes.
+	dirTag := projectName(m.currentComposeDir())
+	tag := tagStyle.Render("["+agentTag+"]") + " " +
+		tagStyle.Render("["+dirTag+"]") + " "
 
 	prompt := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#A78BFA")).
@@ -2152,21 +2447,62 @@ func (m *Model) renderComposer() string {
 			available,
 		))
 	}
+	content := truncate(line, m.width)
+	// The completion menu stacks above the input, freshest match on top,
+	// so the input line never moves out from under the cursor.
+	if menu := m.composeMenuRows(); len(menu) > 0 {
+		content = strings.Join(append(menu, content), "\n")
+	}
 	return lipgloss.NewStyle().
 		Width(m.width).
 		BorderTop(true).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("#334155")).
-		Render(truncate(line, m.width))
+		Render(content)
 }
 
-// composerHeight is the input line and the rule above it, or nothing when
-// there is no agent to launch.
+// composeMenuRows renders the @ completion menu, one directory per row: the
+// project's name leading, its path after in the muted tone, the highlighted
+// row marked the way the prompt is.
+func (m *Model) composeMenuRows() []string {
+	if !m.composeMentionActive() {
+		return nil
+	}
+	entries := m.composeMenuEntries()
+	if len(entries) == 0 {
+		// The menu owns enter for as long as the token stands, so it cannot
+		// silently vanish on a typo — it says why nothing will happen.
+		return []string{mutedStyle.Render(truncate(
+			"  no matching directory · esc keeps the text as typed",
+			max(1, m.width),
+		))}
+	}
+	sel := min(m.composeMenuSel, len(entries)-1)
+	rows := make([]string, 0, len(entries))
+	for i, entry := range entries {
+		marker := "  "
+		nameStyle := mutedStyle
+		if i == sel {
+			marker = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#A78BFA")).
+				Render("❯ ")
+			nameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F8FAFC"))
+		}
+		row := marker + nameStyle.Render(projectName(entry)) + "  " +
+			mutedStyle.Render(abbreviateHome(entry))
+		rows = append(rows, truncate(row, m.width))
+	}
+	return rows
+}
+
+// composerHeight is the input line and the rule above it — plus the
+// completion menu while one is up — or nothing when there is no agent to
+// launch.
 func (m *Model) composerHeight() int {
 	if !m.canCompose() {
 		return 0
 	}
-	return 2
+	return 2 + len(m.composeMenuRows())
 }
 
 // tailCells keeps the end of a string that fits in width display cells. The
@@ -2192,7 +2528,11 @@ func (m *Model) renderFooter() string {
 	}
 	help := "enter open · space preview · tab group · v layout · ? shortcuts"
 	if m.composing {
-		help = "enter start the session · tab switch agent · esc put it down"
+		help = "enter start the session · tab switch agent" +
+			" · @ pick a project or path · esc put it down"
+		if m.composeMentionActive() {
+			help = "↑↓ choose · enter pick · tab complete · esc keep the text"
+		}
 	}
 	right := ""
 	if m.loading {
