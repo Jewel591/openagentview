@@ -2314,6 +2314,81 @@ func TestComposerMentionEscKeepsTheText(t *testing.T) {
 	}
 }
 
+func TestComposerMentionWithNoMatchHoldsEnter(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModelWithProjects(starter)
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "task @zzz")
+	if got := m.composeMenuEntries(); len(got) != 0 {
+		t.Fatalf("a query matching nothing offered %v", got)
+	}
+
+	// The token still owns enter: starting now would ship the typo as prompt
+	// text and the task to the wrong directory.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if starter.dir != "" {
+		t.Fatal("enter on a matchless mention started the session")
+	}
+	if !m.composing || m.composeText != "task @zzz" {
+		t.Fatalf("holding enter disturbed the draft: composing=%v text=%q", m.composing, m.composeText)
+	}
+
+	// Esc is the deliberate way to keep the literal @, after which enter
+	// means what it always means.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if msg := cmd().(sessionStartedMsg); msg.err != nil {
+		t.Fatalf("starting after esc failed: %v", msg.err)
+	}
+	if starter.command[len(starter.command)-1] != "task @zzz" {
+		t.Fatalf("session started with prompt %q, want the literal text", starter.command[len(starter.command)-1])
+	}
+}
+
+func TestComposerMentionCompletesSpacedPaths(t *testing.T) {
+	root := t.TempDir()
+	spaced := filepath.Join(root, "My Project")
+	if err := os.Mkdir(spaced, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := composerModelWithProjects(&fakeStarter{})
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@"+root+"/My")
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+
+	if want := "@" + strings.ReplaceAll(spaced, " ", `\ `) + "/"; m.composeText != want {
+		t.Fatalf("tab completed to %q, want the space escaped as %q", m.composeText, want)
+	}
+	// The escaped space keeps the token in one piece, so the completed path
+	// is still the menu's answer and enter can take it.
+	if got := m.composeMenuEntries(); len(got) != 1 || got[0] != spaced {
+		t.Fatalf("menu after completing a spaced path offered %v", got)
+	}
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.currentComposeDir() != spaced {
+		t.Fatalf("accepting the spaced path set the directory to %q", m.currentComposeDir())
+	}
+}
+
+func TestComposerMenuFitsAShortTerminal(t *testing.T) {
+	m := composerModelWithProjects(&fakeStarter{})
+	m.height = 13
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@")
+
+	// 13 rows leave exactly one for the menu once the header, the board's
+	// own floor, the input line and the footer have taken theirs.
+	if rows := m.composeMenuRows(); len(rows) != 1 {
+		t.Fatalf("a 13-row terminal got %d menu rows", len(rows))
+	}
+	if got, room := m.composerHeight(), m.height-4-m.footerHeight()-minBoardHeight; got > room {
+		t.Fatalf("composer takes %d rows, more than the %d the terminal has spare", got, room)
+	}
+}
+
 func TestComposerAtInsideAWordIsNotAMention(t *testing.T) {
 	m := composerModelWithProjects(&fakeStarter{})
 

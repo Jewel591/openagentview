@@ -726,10 +726,11 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// The composer owns the whole keyboard while it is focused: a task
 	// description is ordinary text, and "q" in one must not quit the board.
 	if m.composing {
+		active := m.composeMentionActive()
 		menu := m.composeMenuEntries()
 		switch stroke {
 		case "esc":
-			if len(menu) > 0 {
+			if active {
 				// The @ was literal text after all; the menu steps aside and
 				// the next esc puts the composer down as usual.
 				m.composeMenuHidden = true
@@ -737,14 +738,23 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.composing = false
 			}
 		case "enter":
-			if len(menu) > 0 {
-				m.acceptComposeMention(menu)
+			if active {
+				// While an @ is being completed, enter means "take the pick"
+				// and nothing else. With no match it does nothing at all —
+				// starting the session now would ship the typo'd token as
+				// prompt text and the task to the wrong directory; esc is
+				// the deliberate way to keep a literal @.
+				if len(menu) > 0 {
+					m.acceptComposeMention(menu)
+				}
 				return m, nil
 			}
 			return m, m.startComposedSession()
 		case "tab":
-			if len(menu) > 0 {
-				m.completeComposeMention(menu)
+			if active {
+				if len(menu) > 0 {
+					m.completeComposeMention(menu)
+				}
 			} else {
 				m.composeAgent = (m.composeAgent + 1) % len(m.launchers)
 			}
@@ -1378,6 +1388,11 @@ func (m *Model) currentComposeDir() string {
 // without the board disappearing behind them.
 const composeMenuMax = 6
 
+// minBoardHeight is the floor the board area never gives up, menu or not —
+// composeMenuCap trims the menu against it so the two floors cannot add up
+// past the bottom of the terminal.
+const minBoardHeight = 5
+
 // composeTextEdited is every edit's bookkeeping: the entries under the menu
 // changed, so the highlight and a standing dismissal are both stale.
 func (m *Model) composeTextEdited() {
@@ -1389,26 +1404,54 @@ func (m *Model) composeTextEdited() {
 // trailing run of non-space text when it opens with an @ that starts a word.
 // The composer only ever edits at its end, so the token under the cursor is
 // always the last one. An @ inside a word — an email address — is not a
-// mention.
+// mention. Spaces escaped shell-style (\ ) stay inside the token, which is
+// how a completed "My Project" survives to the next keystroke; the returned
+// query has the escapes resolved.
 func composeMention(text string) (start int, query string, ok bool) {
-	cut := strings.LastIndexAny(text, " \t")
-	token := text[cut+1:]
+	cut := 0
+	for i := len(text) - 1; i >= 0; i-- {
+		if (text[i] == ' ' || text[i] == '\t') && (i == 0 || text[i-1] != '\\') {
+			cut = i + 1
+			break
+		}
+	}
+	token := text[cut:]
 	if !strings.HasPrefix(token, "@") {
 		return 0, "", false
 	}
-	return cut + 1, token[1:], true
+	return cut, strings.ReplaceAll(token[1:], `\ `, " "), true
+}
+
+// composeMentionActive reports whether the composer is inside an @token the
+// menu should answer for — even one with no matches, since enter changing
+// meaning on an empty result would ship a typo to the wrong directory.
+func (m *Model) composeMentionActive() bool {
+	if !m.composing || m.composeMenuHidden {
+		return false
+	}
+	_, _, ok := composeMention(m.composeText)
+	return ok
+}
+
+// composeMenuCap is how many rows the menu may take on this terminal: up to
+// composeMenuMax, less whatever would push the board below its own minimum
+// height and the whole layout past the bottom of the screen.
+func (m *Model) composeMenuCap() int {
+	room := m.height - 4 - m.footerHeight() - 2 - minBoardHeight
+	return max(1, min(composeMenuMax, room))
 }
 
 // composeMenuEntries is what the @ being typed could mean, in the order the
 // menu shows them: projects off the board matched by name, or directories on
 // disk when the query reads as a path.
 func (m *Model) composeMenuEntries() []string {
-	_, query, ok := composeMention(m.composeText)
-	if !ok || m.composeMenuHidden {
+	if !m.composeMentionActive() {
 		return nil
 	}
+	_, query, _ := composeMention(m.composeText)
+	limit := m.composeMenuCap()
 	if strings.HasPrefix(query, "/") || strings.HasPrefix(query, "~") {
-		return completeDirs(query)
+		return completeDirs(query, limit)
 	}
 	needle := strings.ToLower(query)
 	var entries []string
@@ -1417,7 +1460,7 @@ func (m *Model) composeMenuEntries() []string {
 			strings.Contains(strings.ToLower(dir), needle) {
 			entries = append(entries, dir)
 		}
-		if len(entries) == composeMenuMax {
+		if len(entries) == limit {
 			break
 		}
 	}
@@ -1428,7 +1471,7 @@ func (m *Model) composeMenuEntries() []string {
 // way a shell completes one: entries of the query's parent whose names start
 // with its last element, and the query's own directory first when it already
 // names one, so a fully typed path is accepted rather than completed further.
-func completeDirs(query string) []string {
+func completeDirs(query string, limit int) []string {
 	expanded, ok := expandHome(query)
 	if !ok {
 		return nil
@@ -1462,7 +1505,7 @@ func completeDirs(query string) []string {
 			}
 		}
 		entries = append(entries, full)
-		if len(entries) == composeMenuMax {
+		if len(entries) == limit {
 			break
 		}
 	}
@@ -1534,6 +1577,9 @@ func (m *Model) completeComposeMention(entries []string) {
 	if strings.HasPrefix(query, "~") {
 		completed = abbreviateHome(completed)
 	}
+	// Spaces go back escaped, or the next keystroke's token parse would cut
+	// the path at "My Project"'s gap and the mention would fall apart.
+	completed = strings.ReplaceAll(completed, " ", `\ `)
 	m.composeText = m.composeText[:start] + "@" + completed + "/"
 	m.composeTextEdited()
 }
@@ -1988,7 +2034,7 @@ func (m *Model) renderBoard() string {
 	if len(columns) == 0 {
 		return ""
 	}
-	availableHeight := max(5, m.height-4-m.footerHeight()-m.composerHeight())
+	availableHeight := max(minBoardHeight, m.height-4-m.footerHeight()-m.composerHeight())
 	if m.layout == layoutList {
 		return m.renderList(columns, availableHeight)
 	}
@@ -2416,12 +2462,17 @@ func (m *Model) renderComposer() string {
 // project's name leading, its path after in the muted tone, the highlighted
 // row marked the way the prompt is.
 func (m *Model) composeMenuRows() []string {
-	if !m.composing {
+	if !m.composeMentionActive() {
 		return nil
 	}
 	entries := m.composeMenuEntries()
 	if len(entries) == 0 {
-		return nil
+		// The menu owns enter for as long as the token stands, so it cannot
+		// silently vanish on a typo — it says why nothing will happen.
+		return []string{mutedStyle.Render(truncate(
+			"  no matching directory · esc keeps the text as typed",
+			max(1, m.width),
+		))}
 	}
 	sel := min(m.composeMenuSel, len(entries)-1)
 	rows := make([]string, 0, len(entries))
@@ -2476,7 +2527,7 @@ func (m *Model) renderFooter() string {
 	if m.composing {
 		help = "enter start the session · tab switch agent" +
 			" · @ pick a project or path · esc put it down"
-		if len(m.composeMenuEntries()) > 0 {
+		if m.composeMentionActive() {
 			help = "↑↓ choose · enter pick · tab complete · esc keep the text"
 		}
 	}
