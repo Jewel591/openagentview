@@ -1943,6 +1943,146 @@ func TestCompactTabsPageAndSwitchColumnsOnClick(t *testing.T) {
 	}
 }
 
+type fakeOpener struct {
+	dir     string
+	command []string
+	err     error
+	calls   int
+}
+
+func (f *fakeOpener) OpenTab(dir string, command []string) error {
+	f.calls++
+	f.dir, f.command = dir, command
+	return f.err
+}
+
+type resumableAdapter struct{ previewAdapter }
+
+func (resumableAdapter) ResumeCommand(s agent.Session) (string, []string) {
+	return "claude", []string{"--resume", s.ID}
+}
+
+func tabModel(opener TabOpener) *Model {
+	now := time.Now()
+	return &Model{
+		adapter: &resumableAdapter{},
+		opener:  opener,
+		width:   120,
+		height:  40,
+		sessions: []agent.Session{
+			{
+				ID: "idle-one", Agent: "claude", Title: "Idle",
+				CWD: "/projects/alpha", RuntimeStatus: agent.StatusIdle,
+				UpdatedAt: now, RecencyAt: now,
+			},
+			{
+				ID: "pane-one", Agent: "codex", Title: "In a pane",
+				CWD: "/projects/beta", RuntimeStatus: agent.StatusRunning,
+				UpdatedAt: now, RecencyAt: now, PID: 42, TmuxPane: "%7",
+			},
+		},
+	}
+}
+
+func TestEnterOpensQuickLook(t *testing.T) {
+	m := tabModel(&fakeOpener{})
+	m.column = 2
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.previewOpen {
+		t.Fatal("enter on the board did not open Quick Look")
+	}
+}
+
+func TestCtrlEnterResumesAnIdleSessionInATab(t *testing.T) {
+	opener := &fakeOpener{}
+	m := tabModel(opener)
+	m.column = 2
+
+	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("ctrl+enter produced no command")
+	}
+	if msg := cmd().(tabOpenedMsg); msg.err != nil {
+		t.Fatalf("opening the tab failed: %v", msg.err)
+	}
+	if opener.dir != "/projects/alpha" {
+		t.Fatalf("tab opened in %q, want the session's directory", opener.dir)
+	}
+	want := []string{"claude", "--resume", "idle-one"}
+	if len(opener.command) != len(want) || opener.command[0] != want[0] ||
+		opener.command[1] != want[1] || opener.command[2] != want[2] {
+		t.Fatalf("tab runs %v, want the agent's resume command", opener.command)
+	}
+}
+
+func TestCtrlEnterAttachesToAPaneSessionInATab(t *testing.T) {
+	opener := &fakeOpener{}
+	m := tabModel(opener)
+	m.column = 1
+
+	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
+	if msg := cmd().(tabOpenedMsg); msg.err != nil {
+		t.Fatalf("opening the tab failed: %v", msg.err)
+	}
+	if opener.command[0] != "tmux" {
+		t.Fatalf("tab runs %v, want a tmux command", opener.command)
+	}
+	joined := strings.Join(opener.command, " ")
+	// A fresh tab's shell is never inside tmux, so the way in is attach.
+	if !strings.Contains(joined, "attach -t %7") || strings.Contains(joined, "switch-client") {
+		t.Fatalf("tab runs %q, want an attach to the session's pane", joined)
+	}
+	// An attach cares about the pane, not the path: a workspace gone stale
+	// since must not stop a perfectly attachable session at the cd.
+	if opener.dir != "" {
+		t.Fatalf("attach was given directory %q, want none", opener.dir)
+	}
+}
+
+func TestCtrlEnterRefusesASessionOpenElsewhere(t *testing.T) {
+	opener := &fakeOpener{}
+	m := tabModel(opener)
+	m.sessions[1].TmuxPane = ""
+	m.column = 1
+
+	if cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}); cmd != nil {
+		t.Fatal("a session open in another terminal still produced a command")
+	}
+	if opener.calls != 0 {
+		t.Fatal("the opener was asked for a tab anyway")
+	}
+	if !strings.Contains(m.status, "another terminal") {
+		t.Fatalf("status %q does not say why nothing happened", m.status)
+	}
+}
+
+func TestCtrlEnterFallsBackWithoutARecognizedTerminal(t *testing.T) {
+	m := tabModel(nil)
+	m.column = 2
+	if cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}); cmd == nil {
+		t.Fatal("without an opener ctrl+enter did not fall back to resuming in place")
+	}
+}
+
+func TestQuickLookEnterOpensTheSessionInATab(t *testing.T) {
+	opener := &fakeOpener{}
+	m := tabModel(opener)
+	m.column = 1
+	m.previewOpen = true
+
+	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.previewOpen {
+		t.Fatal("enter left Quick Look open")
+	}
+	if cmd == nil {
+		t.Fatal("Quick Look enter produced no command")
+	}
+	cmd()
+	if opener.calls != 1 {
+		t.Fatalf("the opener was called %d times, want once", opener.calls)
+	}
+}
+
 func TestWheelLeavesTheBoardSelectionAlone(t *testing.T) {
 	// A trackpad's inertia fires dozens of wheel events per flick; mapped to
 	// the selection, a stray swipe sent it flying. Only Quick Look scrolls.
