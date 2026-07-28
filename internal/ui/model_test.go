@@ -55,15 +55,16 @@ func (a *previewAdapter) ResumeCommand(agent.Session) (string, []string) {
 }
 
 type fakePanes struct {
-	lines    []string
-	history  []string
-	cursorX  int
-	cursorY  int
-	cursor   bool
-	width    int
-	err      error
-	sent     []string
-	captured []int
+	lines     []string
+	history   []string
+	cursorX   int
+	cursorY   int
+	cursor    bool
+	alternate bool
+	width     int
+	err       error
+	sent      []string
+	captured  []int
 }
 
 func (p *fakePanes) Capture(
@@ -71,12 +72,13 @@ func (p *fakePanes) Capture(
 ) (tmux.Screen, error) {
 	p.captured = append(p.captured, history)
 	screen := tmux.Screen{
-		Lines:         append([]string(nil), p.lines...),
-		CursorX:       p.cursorX,
-		CursorY:       p.cursorY,
-		CursorVisible: p.cursor,
-		Width:         p.width,
-		HistorySize:   len(p.history),
+		Lines:           append([]string(nil), p.lines...),
+		CursorX:         p.cursorX,
+		CursorY:         p.cursorY,
+		CursorVisible:   p.cursor,
+		AlternateScreen: p.alternate,
+		Width:           p.width,
+		HistorySize:     len(p.history),
 	}
 	if history > 0 {
 		included := min(history, len(p.history))
@@ -200,13 +202,17 @@ func TestQuickLookFallsBackToTheTranscriptWithoutAPane(t *testing.T) {
 	}
 }
 
-// The resting poll carries only the screen, so scrolling a mirror back must
-// fetch tmux's scrollback at once, hold the reader's place while the pane
-// prints on, and snap back to the live screen when the scroll returns.
+// The resting poll carries only the screen. Leaving it freezes the mirror like
+// terminal copy mode, fetches history in bounded pages, and snaps back to a
+// fresh live screen when the scroll returns.
 func TestMirrorScrollReachesTheScrollback(t *testing.T) {
+	history := make([]string, 1200)
+	for i := range history {
+		history[i] = "history-" + strconv.Itoa(i)
+	}
 	panes := &fakePanes{
 		lines:   []string{"now"},
-		history: []string{"older", "old"},
+		history: history,
 	}
 	m := tmuxModel(panes)
 	load := m.openQuickLook()
@@ -230,20 +236,24 @@ func TestMirrorScrollReachesTheScrollback(t *testing.T) {
 	if !ok {
 		t.Fatalf("scroll produced %T, want paneLoadedMsg", cmd())
 	}
-	_, _ = m.Update(msg)
-	if last := panes.captured[len(panes.captured)-1]; last != paneHistoryLines {
+	_, nextPoll := m.Update(msg)
+	if nextPoll != nil {
+		t.Fatal("a scrolled mirror kept its high-frequency live poll running")
+	}
+	if last := panes.captured[len(panes.captured)-1]; last != paneHistoryPageLines {
 		t.Fatalf("scrolled capture asked for %d rows, want %d",
-			last, paneHistoryLines)
+			last, paneHistoryPageLines)
 	}
-	if m.paneLines[0] != "older" {
-		t.Fatalf("paneLines start with %q, want the scrollback", m.paneLines[0])
+	wantOldest := history[len(history)-paneHistoryPageLines]
+	if m.paneLines[0] != wantOldest {
+		t.Fatalf("paneLines start with %q, want %q", m.paneLines[0], wantOldest)
 	}
-	if !strings.Contains(m.View().Content, "older") {
+	if !strings.Contains(m.View().Content, history[len(history)-4]) {
 		t.Fatal("the scrolled mirror did not show the scrollback")
 	}
 
 	_, _ = m.Update(stale().(paneLoadedMsg))
-	if m.paneLines[0] != "older" {
+	if m.paneLines[0] != wantOldest {
 		t.Fatal("a stale screen-only frame replaced the scrollback")
 	}
 
@@ -262,11 +272,11 @@ func TestMirrorScrollReachesTheScrollback(t *testing.T) {
 			m.previewScrollBack, before+1)
 	}
 
-	// Movement between the edges rides the poll; only returning to the bottom
-	// deserves an immediate live screen.
+	// Movement inside the captured page stays local; only returning to the
+	// bottom deserves an immediate live screen and a restarted poll.
 	for m.previewScrollBack > wheelScrollLines {
 		if _, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown}); cmd != nil {
-			t.Fatal("scrolling within the history refreshed the mirror early")
+			t.Fatal("scrolling within the captured history refreshed the mirror")
 		}
 	}
 	_, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
@@ -278,6 +288,92 @@ func TestMirrorScrollReachesTheScrollback(t *testing.T) {
 	}
 	if last := panes.captured[len(panes.captured)-1]; last != 0 {
 		t.Fatalf("the live capture asked for %d rows of history, want none", last)
+	}
+}
+
+// Alternate-screen TUIs give tmux only their current frame. The frame may be
+// a few rows taller than Quick Look's body, but scrolling past those rows must
+// never accumulate an invisible offset that has to be unwound later.
+func TestMirrorScrollClampsToAnAlternateScreen(t *testing.T) {
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = "screen-" + strconv.Itoa(i)
+	}
+	panes := &fakePanes{lines: lines, alternate: true}
+	m := tmuxModel(panes)
+	load := m.openQuickLook()
+	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
+	settleQuickLook(m)
+
+	maxScroll := m.previewMaxScrollBack()
+	if maxScroll <= 0 {
+		t.Fatal("test pane does not extend past the Quick Look body")
+	}
+	for range 100 {
+		_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	}
+	if m.previewScrollBack != maxScroll {
+		t.Fatalf("overscroll = %d, want clamped maximum %d",
+			m.previewScrollBack, maxScroll)
+	}
+	if panes.captured[len(panes.captured)-1] != 0 {
+		t.Fatal("an alternate screen invented tmux history")
+	}
+	if !strings.Contains(m.View().Content, "current screen only") {
+		t.Fatal("the alternate-screen boundary was not explained")
+	}
+
+	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	want := max(0, maxScroll-wheelScrollLines)
+	if m.previewScrollBack != want {
+		t.Fatalf("first downward wheel moved to %d, want %d",
+			m.previewScrollBack, want)
+	}
+}
+
+func TestMirrorWithAShortScreenNeverAccumulatesScroll(t *testing.T) {
+	m := tmuxModel(&fakePanes{
+		lines:     []string{"the whole current screen"},
+		alternate: true,
+	})
+	load := m.openQuickLook()
+	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
+
+	for range 100 {
+		_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	}
+	if m.previewScrollBack != 0 {
+		t.Fatalf("short-screen overscroll = %d, want 0", m.previewScrollBack)
+	}
+}
+
+func TestMirrorCanReachHistoryPastTwoThousandLines(t *testing.T) {
+	history := make([]string, 5000)
+	for i := range history {
+		history[i] = "deep-" + strconv.Itoa(i)
+	}
+	panes := &fakePanes{lines: []string{"now"}, history: history}
+	m := tmuxModel(panes)
+	load := m.openQuickLook()
+	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
+	m.paneInput = false
+
+	cmd := press(t, m, tea.KeyPressMsg{Code: 'g', Text: "g"})
+	if cmd == nil {
+		t.Fatal("going to the oldest history did not expand the capture")
+	}
+	msg := cmd().(paneLoadedMsg)
+	_, nextPoll := m.Update(msg)
+	if nextPoll != nil {
+		t.Fatal("the oldest-history view restarted the live poll")
+	}
+	if last := panes.captured[len(panes.captured)-1]; last != len(history) {
+		t.Fatalf("oldest capture asked for %d rows, want all %d",
+			last, len(history))
+	}
+	if m.paneLines[0] != history[0] {
+		t.Fatalf("oldest captured line = %q, want %q",
+			m.paneLines[0], history[0])
 	}
 }
 
@@ -1515,7 +1611,16 @@ func TestQuickLookKeepsTheSameHeightWhateverTheConversation(t *testing.T) {
 // typing into a mirrored pane, where the arrow keys it would otherwise become
 // walk the agent's input history instead.
 func TestWheelScrollsQuickLook(t *testing.T) {
-	m := &Model{previewOpen: true, paneView: true, paneInput: true}
+	m := &Model{
+		previewOpen: true,
+		paneView:    true,
+		paneInput:   true,
+		paneLoaded:  true,
+		paneLines: []string{
+			"one", "two", "three", "four", "five",
+			"six", "seven", "eight", "nine", "ten",
+		},
+	}
 
 	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
 	if m.previewScrollBack != wheelScrollLines {

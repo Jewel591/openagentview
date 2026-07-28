@@ -272,6 +272,12 @@ type Model struct {
 	paneView           bool
 	paneInput          bool
 	paneLines          []string
+	// paneLoaded distinguishes a real zero-history answer from the zero value
+	// before the opening capture lands. paneHistoryRequested is the scrollback
+	// depth of the capture in flight or most recently accepted, so trackpad
+	// inertia cannot launch the same expansion once per wheel event.
+	paneLoaded           bool
+	paneHistoryRequested int
 	// paneAnchor is the length of the pane's content — scrollback held plus
 	// screen captured — at the last load, which is what a scrolled-back mirror
 	// measures its keep-your-place adjustment against.
@@ -411,10 +417,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		widthChanged := m.width != msg.Width
+		heightChanged := m.height != msg.Height
 		m.width = msg.Width
 		m.height = msg.Height
 		if widthChanged && m.previewOpen {
 			m.rebuildPreviewLayout()
+		}
+		if (widthChanged || heightChanged) && m.previewOpen {
+			m.clampPreviewScrollBack()
 		}
 		if m.previewOpen {
 			m.setPreviewBase(m.renderBase())
@@ -480,8 +490,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rebuildPreviewLayout()
 			if m.previewScrollBack > 0 {
 				m.previewScrollBack += len(m.previewLayout) - oldLineCount
-				m.previewScrollBack = max(0, m.previewScrollBack)
 			}
+			m.clampPreviewScrollBack()
 		}
 		// Poll for as long as the overlay is open. Liveness is deliberately not
 		// consulted here: session discovery is paused behind the overlay, so any
@@ -510,6 +520,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.previewLoading = false
 		m.paneErr = msg.err
 		if msg.err == nil {
+			m.paneLoaded = true
+			m.paneHistoryRequested = msg.screen.History
 			m.paneCursor = msg.screen
 			// Rows are kept down to the cursor even when they are empty: the
 			// cursor sits below the last written line whenever an agent is
@@ -540,13 +552,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			anchor := msg.screen.HistorySize +
 				len(msg.screen.Lines) - msg.screen.History
 			if m.previewScrollBack > 0 && m.paneAnchor > 0 {
-				m.previewScrollBack = max(
-					0, m.previewScrollBack+anchor-m.paneAnchor,
-				)
+				m.previewScrollBack += anchor - m.paneAnchor
 			}
 			m.paneAnchor = anchor
+			m.clampPreviewScrollBack()
+		} else {
+			// Let the next deliberate scroll retry a failed history expansion.
+			m.paneHistoryRequested = m.paneCursor.History
 		}
-		if !msg.poll {
+		if !msg.poll || m.previewScrollBack > 0 {
 			return m, nil
 		}
 		generation := m.previewGeneration
@@ -568,6 +582,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.paneErr = msg.err
+			return m, nil
+		}
+		// A scrolled mirror is deliberately frozen like terminal copy mode.
+		// The keystroke still reached the agent; its echo appears when the
+		// reader returns to the live bottom.
+		if m.previewScrollBack > 0 {
 			return m, nil
 		}
 		session := m.previewedSession()
@@ -730,20 +750,52 @@ func (m *Model) handleWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	scrolled := m.previewScrollBack
 	switch msg.Button {
 	case tea.MouseWheelUp:
-		m.previewScrollBack += wheelScrollLines
+		m.setPreviewScrollBack(m.previewScrollBack + wheelScrollLines)
 	case tea.MouseWheelDown:
-		m.previewScrollBack = max(0, m.previewScrollBack-wheelScrollLines)
+		m.setPreviewScrollBack(m.previewScrollBack - wheelScrollLines)
 	}
 	return m, m.paneScrollRefresh(scrolled)
 }
 
-// paneScrollRefresh reloads the mirror when scrolling crosses the live edge.
-// Entering scrollback needs the history the resting poll has not been
-// fetching, and coming back to the bottom deserves the live screen now rather
-// than when the tick in flight comes due. Between the edges the poll's own
-// cadence is enough.
+// previewMaxScrollBack is the oldest row the active Quick Look data source can
+// honestly show. A transcript has every laid-out row already. A pane has the
+// current captured screen plus however much history tmux says it retains,
+// which may be zero for a full-screen TUI using the alternate screen.
+func (m *Model) previewMaxScrollBack() int {
+	bodyHeight := m.quickLookBodyHeight()
+	if !m.paneView {
+		return max(0, len(m.previewLayout)-bodyHeight)
+	}
+	if !m.paneLoaded {
+		return 0
+	}
+	history := min(m.paneCursor.History, len(m.paneLines))
+	screenRows := len(m.paneLines) - history
+	screenOverflow := max(0, screenRows-bodyHeight)
+	return max(0, m.paneCursor.HistorySize+screenOverflow)
+}
+
+func (m *Model) setPreviewScrollBack(offset int) {
+	m.previewScrollBack = max(0, min(offset, m.previewMaxScrollBack()))
+}
+
+func (m *Model) clampPreviewScrollBack() {
+	m.setPreviewScrollBack(m.previewScrollBack)
+}
+
+// paneScrollRefresh retires the live poll when reading leaves the bottom,
+// expands the captured history only when the requested viewport needs it, and
+// restarts the live poll as soon as the reader returns. A scrolled terminal
+// staying still while output continues is the familiar copy-mode contract —
+// and avoids recapturing thousands of history rows several times a second.
 func (m *Model) paneScrollRefresh(before int) tea.Cmd {
-	if !m.paneView || (before > 0) == (m.previewScrollBack > 0) {
+	if !m.paneView {
+		return nil
+	}
+	crossedLiveEdge := (before > 0) != (m.previewScrollBack > 0)
+	history := m.paneHistoryRequest()
+	needsMoreHistory := history > m.paneHistoryRequested
+	if !crossedLiveEdge && !needsMoreHistory {
 		return nil
 	}
 	session := m.previewedSession()
@@ -752,9 +804,12 @@ func (m *Model) paneScrollRefresh(before int) tea.Cmd {
 	}
 	// A capture already in flight answers for the other side of the edge, and
 	// landing late it would replace the history someone is reading with a
-	// bare screen until the next tick. Retiring the generation drops it — and
-	// the poll chain with it, so the reload restarts the poll.
+	// bare screen until the next tick. Retiring the generation drops it and the
+	// poll chain with it; a reload at the live bottom starts that chain again.
 	m.previewGeneration++
+	if m.previewScrollBack > 0 && !needsMoreHistory {
+		return nil
+	}
 	return m.loadPane(*session, m.previewGeneration, true)
 }
 
@@ -989,20 +1044,21 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "esc", " ", "space":
 			m.previewOpen = false
 		case "up", "k":
-			m.previewScrollBack++
+			m.setPreviewScrollBack(m.previewScrollBack + 1)
 		case "down", "j":
-			m.previewScrollBack = max(0, m.previewScrollBack-1)
+			m.setPreviewScrollBack(m.previewScrollBack - 1)
 		case "pgup":
-			m.previewScrollBack += max(1, m.quickLookBodyHeight()-2)
+			m.setPreviewScrollBack(
+				m.previewScrollBack + max(1, m.quickLookBodyHeight()-2),
+			)
 		case "pgdown":
-			m.previewScrollBack = max(
-				0,
-				m.previewScrollBack-max(1, m.quickLookBodyHeight()-2),
+			m.setPreviewScrollBack(
+				m.previewScrollBack - max(1, m.quickLookBodyHeight()-2),
 			)
 		case "g":
-			m.previewScrollBack = 1 << 20
+			m.setPreviewScrollBack(m.previewMaxScrollBack())
 		case "G":
-			m.previewScrollBack = 0
+			m.setPreviewScrollBack(0)
 		case "d":
 			m.previewOpen = false
 			m.detail = true
@@ -1144,6 +1200,8 @@ func (m *Model) openQuickLook() tea.Cmd {
 	m.previewErr = nil
 	m.previewScrollBack = 0
 	m.paneLines = nil
+	m.paneLoaded = false
+	m.paneHistoryRequested = 0
 	m.paneAnchor = 0
 	m.paneWidth = 0
 	m.paneScreenWidth = 0
@@ -1194,6 +1252,8 @@ func (m *Model) togglePaneView() tea.Cmd {
 	m.paneInput = m.paneView
 	m.previewLoading = true
 	m.previewScrollBack = 0
+	m.paneLoaded = false
+	m.paneHistoryRequested = 0
 	m.paneAnchor = 0
 	m.previewGeneration++
 	if m.paneView {
@@ -1294,11 +1354,32 @@ func (m *Model) paneInterval() time.Duration {
 	return paneRefreshInterval
 }
 
-// paneHistoryLines is how much scrollback a scrolled-back mirror asks for —
-// tmux's own default history-limit, so the mirror reaches as far up as the
-// pane usually remembers. It is only fetched while someone is actually
-// reading backwards; the resting poll stays a screen's worth.
-const paneHistoryLines = 2000
+// paneHistoryPageLines is a starting page, not a ceiling. Captures double from
+// here as the reader moves backwards until they reach the pane's real
+// history_size. That keeps ordinary scrolling cheap without silently hiding a
+// 50,000-line history behind tmux's old 2,000-line default.
+const paneHistoryPageLines = 512
+
+func (m *Model) paneHistoryRequest() int {
+	if !m.paneLoaded ||
+		m.previewScrollBack <= 0 ||
+		m.paneCursor.HistorySize <= 0 {
+		return 0
+	}
+	history := min(m.paneCursor.History, len(m.paneLines))
+	screenRows := len(m.paneLines) - history
+	screenOverflow := max(0, screenRows-m.quickLookBodyHeight())
+	needed := max(0, m.previewScrollBack-screenOverflow)
+	available := max(history, m.paneHistoryRequested)
+	if needed <= available {
+		return available
+	}
+	target := max(needed, paneHistoryPageLines)
+	if available > 0 {
+		target = max(target, available*2)
+	}
+	return min(target, m.paneCursor.HistorySize)
+}
 
 func (m *Model) loadPane(
 	session agent.Session,
@@ -1306,10 +1387,8 @@ func (m *Model) loadPane(
 	poll bool,
 ) tea.Cmd {
 	panes := m.panes
-	history := 0
-	if m.previewScrollBack > 0 {
-		history = paneHistoryLines
-	}
+	history := m.paneHistoryRequest()
+	m.paneHistoryRequested = history
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -3466,6 +3545,9 @@ func (m *Model) renderQuickLook(base string) string {
 	subtitle := projectName(selected.CWD) + " · " + string(m.previewDisplayStatus(*selected))
 	if m.paneView {
 		subtitle = projectName(selected.CWD) + " · live pane " + selected.TmuxTarget
+		if history := m.paneHistoryLabel(); history != "" {
+			subtitle += " · " + history
+		}
 		if m.paneWidth > contentWidth {
 			// The pane is a rendered screen, not text: it cannot be rewrapped to
 			// fit, so say what is missing instead of pretending it fits.
@@ -3651,16 +3733,26 @@ func lerp(from, to int, t float64) int {
 func (m *Model) renderQuickLookFooter(contentWidth int) string {
 	hints := "↑↓ scroll · pgup/pgdn · g/G · enter open · space/esc close"
 	selected := m.previewedSession()
+	history := m.paneHistoryLabel()
 	switch {
 	case m.paneInput && selected != nil:
 		typing := "● typing into " + selected.TmuxTarget +
-			" · esc and every key go to the agent · ctrl+space types a space" +
-			" · space closes · ctrl+] browses"
+			" · ctrl+] then t opens transcript · esc goes to agent" +
+			" · ctrl+space types a space · space closes"
+		if history != "" {
+			typing = history + " · ctrl+] then t opens transcript" +
+				" · typing into " + selected.TmuxTarget +
+				" · esc goes to agent · ctrl+space types a space" +
+				" · space closes"
+		}
 		return lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FBBF24")).
 			Render(truncate(typing, contentWidth))
 	case m.paneView:
-		hints = "i type · t transcript · enter open in tab · esc close"
+		hints = "t session transcript · i type · enter open in tab · esc close"
+		if history != "" {
+			hints = history + " · " + hints
+		}
 	case selected != nil && m.canMirrorPane(*selected):
 		hints = "t live pane · ↑↓ scroll · enter open in tab · esc close"
 	}
@@ -3699,6 +3791,28 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 		return rendered
 	}
 	return rendered + mutedStyle.Render(" · "+hints)
+}
+
+// paneHistoryLabel says where an honest live mirror ends. Full-screen TUIs
+// redraw an alternate screen that tmux never adds to scrollback; ordinary
+// panes can still end at the oldest row their window was configured to keep.
+// The footer keeps the transcript switch first so the next place to look is
+// discoverable without pretending those two data sources are one timeline.
+func (m *Model) paneHistoryLabel() string {
+	if !m.paneView || !m.paneLoaded || m.paneErr != nil {
+		return ""
+	}
+	switch {
+	case m.paneCursor.AlternateScreen:
+		return "current screen only"
+	case m.paneCursor.HistorySize == 0:
+		return "no older pane history"
+	case m.previewScrollBack > 0 &&
+		m.previewScrollBack == m.previewMaxScrollBack():
+		return "oldest retained pane history"
+	default:
+		return ""
+	}
 }
 
 func (m *Model) setPreviewBase(base string) {
