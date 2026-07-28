@@ -3739,6 +3739,9 @@ func (m *Model) renderQuickLook(base string) string {
 		subtitle = projectName(selected.CWD) +
 			" · session transcript · live pane continues below"
 	}
+	if !m.paneView && m.previewTranscriptLoadingMore {
+		subtitle += " · loading older history…"
+	}
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("#F8FAFC")).

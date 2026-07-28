@@ -429,6 +429,10 @@ func TestTranscriptLoadsOlderMessagesOnlyWhenItsTopIsCrossed(t *testing.T) {
 	if m.previewMessageLimit != previewMessagePage*2 {
 		t.Fatalf("in-flight expansion grew again to %d", m.previewMessageLimit)
 	}
+	settleQuickLook(m)
+	if !strings.Contains(m.View().Content, "loading older history") {
+		t.Fatal("an in-flight transcript expansion had no visible feedback")
+	}
 	_, _ = m.Update(second)
 	if len(m.previewMessages) != previewMessagePage*2 {
 		t.Fatalf("expanded transcript messages = %d, want %d",
