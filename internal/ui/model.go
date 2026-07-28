@@ -55,6 +55,15 @@ const dismissRetention = 30 * 24 * time.Hour
 
 const previewRefreshInterval = time.Second
 
+// Transcript Quick Look starts with enough messages for an ordinary window and
+// only asks for more when the reader reaches the top. Each explicit expansion
+// makes one bounded tail rebuild; the one-second poll keeps using the same
+// limit, so repeated reads still cost only what the agent appended.
+const (
+	previewMessagePage     = 16
+	previewMessageLimitMax = 4096
+)
+
 // A mirrored pane is a screen rather than a transcript, so it is polled faster
 // than a rollout log: the point of watching one is seeing the agent move.
 // Typing tightens it further, since a keystroke that takes half a second to
@@ -127,6 +136,7 @@ type refreshMsg struct {
 type previewLoadedMsg struct {
 	sessionID  string
 	generation uint64
+	limit      int
 	transcript agent.Transcript
 	err        error
 }
@@ -250,28 +260,41 @@ type Model struct {
 	// meaning every agent. Each header chip toggles its own entry, so the
 	// filter reads as "these agents" rather than a single choice cycled
 	// through — two agents at once is a question the board is asked often.
-	agentFilter        map[string]bool
-	detail             bool
-	helpOpen           bool
-	previewOpen        bool
-	previewLoading     bool
-	previewSessionID   string
-	previewSession     agent.Session
-	previewGeneration  uint64
-	previewMessages    []agent.TranscriptMessage
-	previewStatus      agent.RuntimeStatus
-	previewActivity    agent.Activity
-	previewErr         error
-	previewScrollBack  int
-	previewLayout      []string
-	previewLayoutWidth int
-	previewWrapped     map[string][]string
-	previewWrapWidth   int
-	previewBase        string
-	previewBackdrop    previewBackdrop
-	paneView           bool
-	paneInput          bool
-	paneLines          []string
+	agentFilter         map[string]bool
+	detail              bool
+	helpOpen            bool
+	previewOpen         bool
+	previewLoading      bool
+	previewSessionID    string
+	previewSession      agent.Session
+	previewGeneration   uint64
+	previewMessages     []agent.TranscriptMessage
+	previewStatus       agent.RuntimeStatus
+	previewActivity     agent.Activity
+	previewErr          error
+	previewScrollBack   int
+	previewMessageLimit int
+	previewLoadedLimit  int
+	// previewTranscriptExhausted records that the adapter returned fewer
+	// messages than requested (or no growth for a larger request), so repeated
+	// wheel inertia at the oldest message cannot keep rebuilding a large log.
+	previewTranscriptExhausted   bool
+	previewTranscriptLoadingMore bool
+	previewPendingScrollBack     int
+	// previewTranscriptReturnsToPane distinguishes an automatic continuation
+	// from an explicit t-toggle. Only the automatic route treats the bottom of
+	// the transcript as the doorway back to the live pane.
+	previewTranscriptReturnsToPane bool
+	previewReturnPaneInput         bool
+	previewLayout                  []string
+	previewLayoutWidth             int
+	previewWrapped                 map[string][]string
+	previewWrapWidth               int
+	previewBase                    string
+	previewBackdrop                previewBackdrop
+	paneView                       bool
+	paneInput                      bool
+	paneLines                      []string
 	// paneLoaded distinguishes a real zero-history answer from the zero value
 	// before the opening capture lands. paneHistoryRequested is the scrollback
 	// depth of the capture in flight or most recently accepted, so trackpad
@@ -475,8 +498,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		wasLoading := m.previewLoading
 		m.previewLoading = false
+		m.previewTranscriptLoadingMore = false
 		m.previewStatus = msg.transcript.Status
 		m.previewActivity = msg.transcript.Activity
+		oldMessageCount := len(m.previewMessages)
+		oldLoadedLimit := m.previewLoadedLimit
+		requestedOlder := oldLoadedLimit > 0 && msg.limit > oldLoadedLimit
 		if wasLoading ||
 			previewChanged(
 				m.previewMessages,
@@ -488,10 +515,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewMessages = msg.transcript.Messages
 			m.previewErr = msg.err
 			m.rebuildPreviewLayout()
-			if m.previewScrollBack > 0 {
+			// Normal polling adds content at the live bottom, so increasing the
+			// bottom-relative offset by the layout growth holds a reader's
+			// viewport still. A larger message limit prepends older content:
+			// leaving the offset alone holds the old first row in place, then
+			// the pending boundary gesture moves just a few rows above it.
+			if m.previewScrollBack > 0 && !requestedOlder {
 				m.previewScrollBack += len(m.previewLayout) - oldLineCount
 			}
 			m.clampPreviewScrollBack()
+		}
+		if msg.err == nil {
+			m.previewLoadedLimit = max(m.previewLoadedLimit, msg.limit)
+			m.previewTranscriptExhausted =
+				len(msg.transcript.Messages) < msg.limit ||
+					(requestedOlder && len(msg.transcript.Messages) <= oldMessageCount) ||
+					msg.limit >= previewMessageLimitMax
+			if m.previewPendingScrollBack > 0 {
+				m.setPreviewScrollBack(
+					m.previewScrollBack + m.previewPendingScrollBack,
+				)
+				m.previewPendingScrollBack = 0
+			}
 		}
 		// Poll for as long as the overlay is open. Liveness is deliberately not
 		// consulted here: session discovery is paused behind the overlay, so any
@@ -747,20 +792,136 @@ func (m *Model) handleWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	if !m.previewOpen {
 		return m, nil
 	}
-	scrolled := m.previewScrollBack
 	switch msg.Button {
 	case tea.MouseWheelUp:
-		m.setPreviewScrollBack(m.previewScrollBack + wheelScrollLines)
+		return m, m.scrollPreviewBy(wheelScrollLines)
 	case tea.MouseWheelDown:
-		m.setPreviewScrollBack(m.previewScrollBack - wheelScrollLines)
+		return m, m.scrollPreviewBy(-wheelScrollLines)
 	}
-	return m, m.paneScrollRefresh(scrolled)
+	return m, nil
+}
+
+// scrollPreviewBy carries one reading gesture across the two honest history
+// sources. tmux owns the current rendered pane and whatever normal-screen
+// scrollback it retained; the agent transcript owns the older conversation.
+// Crossing either boundary is explicit in the UI, but does not make the user
+// stop scrolling and hunt for a mode key.
+func (m *Model) scrollPreviewBy(delta int) tea.Cmd {
+	if delta == 0 {
+		return nil
+	}
+	before := m.previewScrollBack
+	desired := before + delta
+	maxScroll := m.previewMaxScrollBack()
+	if delta > 0 && desired > maxScroll {
+		overflow := max(1, desired-maxScroll)
+		switch {
+		case m.paneView && m.paneLoaded:
+			return m.continuePaneIntoTranscript(overflow)
+		case !m.paneView && m.previewLoading:
+			m.previewPendingScrollBack = max(
+				m.previewPendingScrollBack,
+				overflow,
+			)
+			return nil
+		case !m.paneView && m.previewTranscriptLoadingMore:
+			m.previewPendingScrollBack = max(
+				m.previewPendingScrollBack,
+				overflow,
+			)
+			return nil
+		case !m.paneView && !m.previewTranscriptExhausted:
+			if cmd := m.loadMorePreviewMessages(overflow); cmd != nil {
+				return cmd
+			}
+		}
+	}
+	if delta < 0 &&
+		!m.paneView &&
+		m.previewTranscriptReturnsToPane &&
+		desired <= 0 {
+		return m.returnToLivePane()
+	}
+	m.setPreviewScrollBack(desired)
+	return m.paneScrollRefresh(before)
+}
+
+func (m *Model) continuePaneIntoTranscript(overflow int) tea.Cmd {
+	session := m.previewedSession()
+	if session == nil {
+		return nil
+	}
+	m.previewTranscriptReturnsToPane = true
+	m.previewReturnPaneInput = m.paneInput
+	m.paneView = false
+	m.paneInput = false
+	m.previewLoading = true
+	m.previewScrollBack = 0
+	m.previewMessageLimit = previewMessagePage
+	m.previewLoadedLimit = 0
+	m.previewTranscriptExhausted = false
+	m.previewTranscriptLoadingMore = false
+	m.previewPendingScrollBack = max(1, overflow)
+	m.previewMessages = nil
+	m.previewErr = nil
+	m.previewGeneration++
+	m.rebuildPreviewLayout()
+	return m.loadPreview(*session, m.previewGeneration)
+}
+
+func (m *Model) returnToLivePane() tea.Cmd {
+	session := m.previewedSession()
+	if session == nil || !m.canMirrorPane(*session) {
+		return nil
+	}
+	m.paneView = true
+	m.paneInput = m.previewReturnPaneInput
+	m.previewTranscriptReturnsToPane = false
+	m.previewReturnPaneInput = false
+	m.previewPendingScrollBack = 0
+	m.previewTranscriptLoadingMore = false
+	m.previewLoading = true
+	m.previewScrollBack = 0
+	m.paneLoaded = false
+	m.paneHistoryRequested = 0
+	m.paneAnchor = 0
+	m.previewGeneration++
+	return m.loadPane(*session, m.previewGeneration, true)
+}
+
+func (m *Model) loadMorePreviewMessages(overflow int) tea.Cmd {
+	session := m.previewedSession()
+	if session == nil ||
+		m.previewLoadedLimit <= 0 ||
+		m.previewMessageLimit >= previewMessageLimitMax {
+		m.previewTranscriptExhausted = true
+		return nil
+	}
+	next := min(
+		previewMessageLimitMax,
+		max(previewMessagePage, m.previewMessageLimit*2),
+	)
+	if next <= m.previewMessageLimit {
+		m.previewTranscriptExhausted = true
+		return nil
+	}
+	m.previewMessageLimit = next
+	m.previewTranscriptLoadingMore = true
+	m.previewPendingScrollBack = max(
+		m.previewPendingScrollBack,
+		max(1, overflow),
+	)
+	// Retire the current poll. The expanded answer starts exactly one new
+	// polling chain, while the existing laid-out transcript remains visible.
+	m.previewGeneration++
+	return m.loadPreview(*session, m.previewGeneration)
 }
 
 // previewMaxScrollBack is the oldest row the active Quick Look data source can
-// honestly show. A transcript has every laid-out row already. A pane has the
-// current captured screen plus however much history tmux says it retains,
-// which may be zero for a full-screen TUI using the alternate screen.
+// honestly show right now. A transcript can ask its adapter for an older page
+// when this loaded boundary is crossed. A pane has the current captured screen
+// plus however much history tmux says it retains, which may be zero for a
+// full-screen TUI using the alternate screen.
 func (m *Model) previewMaxScrollBack() int {
 	bodyHeight := m.quickLookBodyHeight()
 	if !m.paneView {
@@ -1025,7 +1186,6 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.previewOpen {
-		scrolled := m.previewScrollBack
 		switch stroke {
 		case "ctrl+c", "ctrl+q", "q":
 			return m, tea.Quit
@@ -1044,21 +1204,24 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "esc", " ", "space":
 			m.previewOpen = false
 		case "up", "k":
-			m.setPreviewScrollBack(m.previewScrollBack + 1)
+			return m, m.scrollPreviewBy(1)
 		case "down", "j":
-			m.setPreviewScrollBack(m.previewScrollBack - 1)
+			return m, m.scrollPreviewBy(-1)
 		case "pgup":
-			m.setPreviewScrollBack(
-				m.previewScrollBack + max(1, m.quickLookBodyHeight()-2),
-			)
+			return m, m.scrollPreviewBy(max(1, m.quickLookBodyHeight()-2))
 		case "pgdown":
-			m.setPreviewScrollBack(
-				m.previewScrollBack - max(1, m.quickLookBodyHeight()-2),
-			)
+			return m, m.scrollPreviewBy(-max(1, m.quickLookBodyHeight()-2))
 		case "g":
+			before := m.previewScrollBack
 			m.setPreviewScrollBack(m.previewMaxScrollBack())
+			return m, m.paneScrollRefresh(before)
 		case "G":
+			if !m.paneView && m.previewTranscriptReturnsToPane {
+				return m, m.returnToLivePane()
+			}
+			before := m.previewScrollBack
 			m.setPreviewScrollBack(0)
+			return m, m.paneScrollRefresh(before)
 		case "d":
 			m.previewOpen = false
 			m.detail = true
@@ -1066,7 +1229,7 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.previewOpen = false
 			return m, m.openSelectedInTab()
 		}
-		return m, m.paneScrollRefresh(scrolled)
+		return m, nil
 	}
 
 	if m.helpOpen {
@@ -1199,6 +1362,13 @@ func (m *Model) openQuickLook() tea.Cmd {
 	m.previewActivity = agent.Activity{}
 	m.previewErr = nil
 	m.previewScrollBack = 0
+	m.previewMessageLimit = previewMessagePage
+	m.previewLoadedLimit = 0
+	m.previewTranscriptExhausted = false
+	m.previewTranscriptLoadingMore = false
+	m.previewPendingScrollBack = 0
+	m.previewTranscriptReturnsToPane = false
+	m.previewReturnPaneInput = false
 	m.paneLines = nil
 	m.paneLoaded = false
 	m.paneHistoryRequested = 0
@@ -1252,6 +1422,13 @@ func (m *Model) togglePaneView() tea.Cmd {
 	m.paneInput = m.paneView
 	m.previewLoading = true
 	m.previewScrollBack = 0
+	m.previewMessageLimit = previewMessagePage
+	m.previewLoadedLimit = 0
+	m.previewTranscriptExhausted = false
+	m.previewTranscriptLoadingMore = false
+	m.previewPendingScrollBack = 0
+	m.previewTranscriptReturnsToPane = false
+	m.previewReturnPaneInput = false
 	m.paneLoaded = false
 	m.paneHistoryRequested = 0
 	m.paneAnchor = 0
@@ -1405,13 +1582,15 @@ func (m *Model) loadPane(
 
 func (m *Model) loadPreview(session agent.Session, generation uint64) tea.Cmd {
 	adapter := m.adapter
+	limit := max(previewMessagePage, m.previewMessageLimit)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		transcript, err := adapter.Preview(ctx, session, 16)
+		transcript, err := adapter.Preview(ctx, session, limit)
 		return previewLoadedMsg{
 			sessionID:  session.ID,
 			generation: generation,
+			limit:      limit,
 			transcript: transcript,
 			err:        err,
 		}
@@ -3556,6 +3735,12 @@ func (m *Model) renderQuickLook(base string) string {
 				m.paneWidth-contentWidth,
 			)
 		}
+	} else if m.previewTranscriptReturnsToPane {
+		subtitle = projectName(selected.CWD) +
+			" · session transcript · live pane continues below"
+	}
+	if !m.paneView && m.previewTranscriptLoadingMore {
+		subtitle += " · loading older history…"
 	}
 	header := lipgloss.NewStyle().
 		Bold(true).
@@ -3737,10 +3922,11 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 	switch {
 	case m.paneInput && selected != nil:
 		typing := "● typing into " + selected.TmuxTarget +
-			" · ctrl+] then t opens transcript · esc goes to agent" +
+			" · wheel up reads history · ctrl+] then t opens transcript" +
+			" · esc goes to agent" +
 			" · ctrl+space types a space · space closes"
 		if history != "" {
-			typing = history + " · ctrl+] then t opens transcript" +
+			typing = history + " · wheel up continues in transcript" +
 				" · typing into " + selected.TmuxTarget +
 				" · esc goes to agent · ctrl+space types a space" +
 				" · space closes"
@@ -3749,10 +3935,12 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 			Foreground(lipgloss.Color("#FBBF24")).
 			Render(truncate(typing, contentWidth))
 	case m.paneView:
-		hints = "t session transcript · i type · enter open in tab · esc close"
+		hints = "↑ past top opens transcript · t session transcript · i type · enter open in tab · esc close"
 		if history != "" {
 			hints = history + " · " + hints
 		}
+	case m.previewTranscriptReturnsToPane:
+		hints = "↓ past bottom returns live pane · ↑↓ transcript · t live pane · esc close"
 	case selected != nil && m.canMirrorPane(*selected):
 		hints = "t live pane · ↑↓ scroll · enter open in tab · esc close"
 	}
@@ -3796,8 +3984,8 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 // paneHistoryLabel says where an honest live mirror ends. Full-screen TUIs
 // redraw an alternate screen that tmux never adds to scrollback; ordinary
 // panes can still end at the oldest row their window was configured to keep.
-// The footer keeps the transcript switch first so the next place to look is
-// discoverable without pretending those two data sources are one timeline.
+// The footer explains that scrolling past this honest edge continues through
+// the transcript, without pretending the two sources are one terminal record.
 func (m *Model) paneHistoryLabel() string {
 	if !m.paneView || !m.paneLoaded || m.paneErr != nil {
 		return ""
