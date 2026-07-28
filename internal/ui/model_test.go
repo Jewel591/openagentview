@@ -2517,6 +2517,21 @@ func TestProjectColumnsLeadWithWhatWantsAPerson(t *testing.T) {
 	}
 }
 
+func TestHelpFooterHeightMatchesItsLines(t *testing.T) {
+	m := &Model{helpOpen: true, width: 200}
+	if got := m.footerHeight(); got != len(m.shortcutHelpLines())+1 || got != 2 {
+		t.Fatalf("wide help takes %d rows, want 2", got)
+	}
+	m.width = 80
+	if got := m.footerHeight(); got != len(m.shortcutHelpLines())+1 || got != 3 {
+		t.Fatalf("narrow help takes %d rows, want 3", got)
+	}
+	m.helpOpen = false
+	if m.footerHeight() != 1 {
+		t.Fatal("the closed footer is one row")
+	}
+}
+
 func TestRunningPulseArmsAndStandsDown(t *testing.T) {
 	now := time.Now()
 	running := agent.Session{

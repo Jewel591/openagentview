@@ -2691,28 +2691,31 @@ func (m *Model) footerHeight() int {
 	if !m.helpOpen {
 		return 1
 	}
-	if m.width < 100 {
-		return 6
-	}
-	return 5
+	// The rule on top of the help block takes a line of its own.
+	return len(m.shortcutHelpLines()) + 1
 }
 
-// renderShortcutHelp is deliberately one short line of the keys worth
-// memorizing. Everything contextual teaches itself where it applies — the
-// standing footer names the views, the composer and Quick Look each carry
-// their own hints — and a wall of every binding reads as none of them.
-func (m *Model) renderShortcutHelp() string {
-	var lines []string
-	if m.width < 100 {
-		lines = []string{
-			"↑↓←→ move  ·  enter open  ·  space quick look  ·  n new task",
-			"/ search  ·  a archive  ·  ctrl+x ×2 dismiss  ·  q quit",
-		}
-	} else {
-		lines = []string{
-			"↑↓←→ move   ·   enter open   ·   space quick look   ·   n new task   ·   / search   ·   a archive   ·   ctrl+x ×2 dismiss   ·   q quit",
-		}
+// shortcutHelpLines is deliberately one short line of the keys worth
+// memorizing, split in two only when the terminal cannot hold it whole.
+// Everything contextual teaches itself where it applies — the standing
+// footer names the views, the composer and Quick Look each carry their own
+// hints — and a wall of every binding reads as none of them.
+func (m *Model) shortcutHelpLines() []string {
+	const wide = "↑↓←→ move · enter open · space quick look · n new task" +
+		" · / search · a archive · ctrl+x ×2 dismiss · q quit"
+	// One padding column on the left, and one spare on the right so the
+	// line never kisses the terminal's edge.
+	if lipgloss.Width(wide) <= m.width-2 {
+		return []string{wide}
 	}
+	return []string{
+		"↑↓←→ move · enter open · space quick look · n new task",
+		"/ search · a archive · ctrl+x ×2 dismiss · q quit",
+	}
+}
+
+func (m *Model) renderShortcutHelp() string {
+	lines := m.shortcutHelpLines()
 	return lipgloss.NewStyle().
 		Width(m.width).
 		BorderTop(true).
