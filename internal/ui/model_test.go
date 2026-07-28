@@ -3052,7 +3052,7 @@ func TestALitAgentChipSurvivesItsAgentLeavingTheBoard(t *testing.T) {
 func TestASingleAgentGetsNoChips(t *testing.T) {
 	m := agentFilterModel()
 	m.sessions = m.sessions[:1]
-	if chips, widths := m.renderAgentChips(); chips != "" || widths != nil {
+	if chips, widths := m.renderAgentChips(false); chips != "" || widths != nil {
 		t.Fatalf("chips with one agent = %q/%v, want none", chips, widths)
 	}
 }
@@ -3070,5 +3070,164 @@ func TestCtrlQQuitsTheBoard(t *testing.T) {
 		if cmd := press(t, m, key); cmd == nil {
 			t.Fatalf("%v returned no command, want quit", key)
 		}
+	}
+}
+
+// Quit has to work from the overlays too: the input method that swallows q on
+// the board swallows it just as thoroughly with Quick Look open.
+func TestCtrlQQuitsFromTheOverlays(t *testing.T) {
+	for name, open := range map[string]func(*Model){
+		"quick look": func(m *Model) { m.previewOpen = true },
+		"help":       func(m *Model) { m.helpOpen = true },
+		"detail":     func(m *Model) { m.detail = true },
+	} {
+		m := agentFilterModel()
+		m.clampSelection()
+		open(m)
+		if cmd := press(t, m, tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl}); cmd == nil {
+			t.Fatalf("ctrl+q with %s open returned no command, want quit", name)
+		}
+	}
+}
+
+// Filtering redraws the columns under the cursor, so the selection follows the
+// session rather than the row it happened to be on.
+func TestTogglingAnAgentKeepsTheSelectedSession(t *testing.T) {
+	m := agentFilterModel()
+	m.toggleAgentFilter("grok")
+	m.clampSelection()
+	selected := m.selected()
+	if selected == nil || selected.ID != "g1" {
+		t.Fatalf("selected = %#v, want the grok session", selected)
+	}
+
+	// Lighting claude puts a card ahead of the grok one in the same column.
+	m.toggleAgentFilter("claude")
+	if got := m.selected(); got == nil || got.ID != "g1" {
+		t.Fatalf("after widening the filter selected = %#v, want g1 still", got)
+	}
+}
+
+// An empty board under a filter is the filter's doing, and saying "no agents
+// running" would be a finding the board did not make.
+func TestAnEmptyFilteredBoardNamesTheFilterAndTheWayOut(t *testing.T) {
+	m := agentFilterModel()
+	m.lastSync = time.Now()
+	m.sessions[2].RecencyAt = time.Now().Add(-48 * time.Hour)
+	m.toggleAgentFilter("grok")
+
+	board := m.renderEmptyBoard(12)
+	for _, want := range []string{"GROK", "show every agent"} {
+		if !strings.Contains(board, want) {
+			t.Fatalf("empty filtered board = %q, want it to mention %q", board, want)
+		}
+	}
+	if strings.Contains(board, "No agents running") {
+		t.Fatal("empty filtered board blamed the agents, not the filter")
+	}
+}
+
+// The chips are the newest thing on the header, so they give way before the
+// search hint they were added alongside.
+func TestANarrowHeaderKeepsTheSearchHintOverTheChips(t *testing.T) {
+	m := agentFilterModel()
+	m.width = 80
+
+	header := m.renderHeader()
+	if !strings.Contains(header, "/ search") {
+		t.Fatalf("80-column header = %q, want the search hint kept", header)
+	}
+	// Every recorded zone has to land on screen, chips included.
+	for _, zone := range m.clickZones {
+		if zone.rect.x+zone.rect.width > m.width {
+			t.Fatalf("zone %#v runs past the %d-column header", zone, m.width)
+		}
+	}
+
+	// At 80 columns the tabs and the hint leave no room for chips at all, so
+	// the lit agent is said in the hint instead of vanishing with them.
+	m.toggleAgentFilter("codex")
+	m.clickZones = nil
+	header = m.renderHeader()
+	if !strings.Contains(header, "CODEX") || !strings.Contains(header, "/ search") {
+		t.Fatalf("80-column filtered header = %q, want the lit agent named and the hint kept", header)
+	}
+	if strings.Contains(header, "last 24h") {
+		t.Fatalf("80-column filtered header = %q, want the filter said where last 24h was", header)
+	}
+}
+
+// The narrow header's fallback hint has its own width budget: naming three
+// agents where one fit would push the search entry off the line it was kept
+// on in the first place.
+func TestTheNarrowHeaderHintFitsWhateverItSays(t *testing.T) {
+	for _, lit := range [][]string{{"codex"}, {"claude", "codex"}, {"claude", "codex", "grok"}} {
+		m := agentFilterModel()
+		m.width = 80
+		for _, name := range lit {
+			m.toggleAgentFilter(name)
+		}
+		header := m.renderHeader()
+		if !strings.Contains(header, "/ search") {
+			t.Fatalf("80-column header with %v lit = %q, want the search entry kept", lit, header)
+		}
+		for _, zone := range m.clickZones {
+			if zone.rect.x+zone.rect.width > m.width {
+				t.Fatalf("zone %#v runs past the %d-column header with %v lit", zone, m.width, lit)
+			}
+		}
+	}
+}
+
+// A search inside a filter is still inside it, and a header that has dropped
+// its chips has to say so or the missing results look like the query's doing.
+func TestTheNarrowHeaderSaysTheFilterAlongsideAQuery(t *testing.T) {
+	m := agentFilterModel()
+	m.width = 80
+	m.toggleAgentFilter("codex")
+	m.query = "task"
+
+	header := m.renderHeader()
+	if !strings.Contains(header, "CODEX") || !strings.Contains(header, "filter: task") {
+		t.Fatalf("80-column header = %q, want both the agent and the query named", header)
+	}
+}
+
+// Clearing the filter has to actually produce the cards the empty board
+// promises, and an archived session is one no column will take.
+func TestTheEmptyBoardDoesNotPromiseArchivedSessions(t *testing.T) {
+	m := agentFilterModel()
+	m.lastSync = time.Now()
+	m.sessions = []agent.Session{
+		{ID: "g1", Agent: "grok", RuntimeStatus: agent.StatusIdle, RecencyAt: time.Now().Add(-48 * time.Hour)},
+		{ID: "c1", Agent: "claude", RuntimeStatus: agent.StatusArchived, Archived: true, RecencyAt: time.Now()},
+	}
+	m.toggleAgentFilter("grok")
+
+	if held := m.heldBackByAgentFilter(); held != 0 {
+		t.Fatalf("held back = %d, want 0: the only other session is archived", held)
+	}
+	board := m.renderEmptyBoard(12)
+	if strings.Contains(board, "waiting behind the filter") {
+		t.Fatalf("empty board = %q, want it not to promise cards clearing the filter cannot produce", board)
+	}
+}
+
+// The count the empty board does give has to be the number of cards clearing
+// the filter puts back.
+func TestTheEmptyBoardCountsTheCardsClearingTheFilterWouldShow(t *testing.T) {
+	m := agentFilterModel()
+	m.lastSync = time.Now()
+	m.sessions = append(m.sessions, agent.Session{
+		ID: "old", Agent: "claude", RuntimeStatus: agent.StatusIdle,
+		RecencyAt: time.Now().Add(-48 * time.Hour),
+	})
+	// grok is lit but its only session is stale, so the board under the
+	// filter is empty while claude and codex still have a card each.
+	m.sessions[2].RecencyAt = time.Now().Add(-48 * time.Hour)
+	m.toggleAgentFilter("grok")
+
+	if held := m.heldBackByAgentFilter(); held != 2 {
+		t.Fatalf("held back = %d, want the 2 recent sessions of the other agents", held)
 	}
 }
