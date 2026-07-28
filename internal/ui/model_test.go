@@ -2169,8 +2169,7 @@ func TestFailedDismissLeavesTheSessionOnTheBoard(t *testing.T) {
 	}
 }
 
-func TestComposerCyclesDirectoriesAcrossProjects(t *testing.T) {
-	starter := &fakeStarter{}
+func composerModelWithProjects(starter *fakeStarter) *Model {
 	m := composerModel(starter)
 	now := time.Now()
 	m.sessions = []agent.Session{
@@ -2191,33 +2190,138 @@ func TestComposerCyclesDirectoriesAcrossProjects(t *testing.T) {
 			RecencyAt:     now,
 		},
 	}
+	return m
+}
+
+func TestComposerMentionPicksAProject(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModelWithProjects(starter)
 
 	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
-	shiftTab := tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
+	typeText(t, m, "fix the bug @be")
+	if got := m.composeMenuEntries(); len(got) != 1 || got[0] != "/projects/beta" {
+		t.Fatalf("menu for @be offered %v, want just the matching project", got)
+	}
 
-	// The cycle leads with the board's own directory, then projects freshest
-	// first, and wraps.
-	press(t, m, shiftTab)
+	// Enter takes the pick rather than starting the session, and the token
+	// leaves the text: the directory is the task's address, not its words.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.currentComposeDir() != "/projects/beta" {
-		t.Fatalf("first shift+tab picked %q, want the freshest project", m.currentComposeDir())
+		t.Fatalf("accepting the mention set the directory to %q", m.currentComposeDir())
 	}
-	press(t, m, shiftTab)
-	if m.currentComposeDir() != "/projects/alpha" {
-		t.Fatalf("second shift+tab picked %q, want the older project", m.currentComposeDir())
+	if m.composeText != "fix the bug " {
+		t.Fatalf("accepting the mention left the text as %q", m.composeText)
 	}
-	press(t, m, shiftTab)
-	if m.currentComposeDir() != "/projects/openagentview" {
-		t.Fatalf("third shift+tab picked %q, want to wrap to the board's directory", m.currentComposeDir())
+	if starter.dir != "" {
+		t.Fatal("enter on an open menu started the session")
 	}
-	press(t, m, shiftTab)
 
-	typeText(t, m, "task")
+	typeText(t, m, "now")
 	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if msg := cmd().(sessionStartedMsg); msg.err != nil {
 		t.Fatalf("starting in a picked directory failed: %v", msg.err)
 	}
 	if starter.dir != "/projects/beta" {
 		t.Fatalf("session started in %q, want the picked project", starter.dir)
+	}
+	if starter.command[len(starter.command)-1] != "fix the bug now" {
+		t.Fatalf("session started with prompt %q", starter.command[len(starter.command)-1])
+	}
+}
+
+func TestComposerMentionMenuNavigates(t *testing.T) {
+	m := composerModelWithProjects(&fakeStarter{})
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@")
+
+	// A bare @ offers everywhere a task can start: the board's own
+	// directory first, then projects freshest first.
+	want := []string{"/projects/openagentview", "/projects/beta", "/projects/alpha"}
+	got := m.composeMenuEntries()
+	if len(got) != len(want) {
+		t.Fatalf("bare @ offered %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("bare @ offered %v, want %v", got, want)
+		}
+	}
+
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.currentComposeDir() != "/projects/beta" {
+		t.Fatalf("picking the second row set the directory to %q", m.currentComposeDir())
+	}
+}
+
+func TestComposerMentionCompletesPaths(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"alpha", "beta"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := composerModelWithProjects(&fakeStarter{})
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@"+root+"/al")
+
+	// Tab completes shell style: the directory fills the token, open at its
+	// end so the next segment can be typed straight away.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if want := "@" + filepath.Join(root, "alpha") + "/"; m.composeText != want {
+		t.Fatalf("tab completed to %q, want %q", m.composeText, want)
+	}
+
+	// A fully typed directory is offered as itself, so enter can accept it
+	// even though there is nothing below it to complete.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if want := filepath.Join(root, "alpha"); m.currentComposeDir() != want {
+		t.Fatalf("accepting the path set the directory to %q, want %q", m.currentComposeDir(), want)
+	}
+	if m.composeText != "" {
+		t.Fatalf("accepting the path left the text as %q", m.composeText)
+	}
+}
+
+func TestComposerMentionEscKeepsTheText(t *testing.T) {
+	starter := &fakeStarter{}
+	m := composerModelWithProjects(starter)
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "@beta")
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	if !m.composing {
+		t.Fatal("esc on an open menu put the whole composer down")
+	}
+	if len(m.composeMenuEntries()) != 0 {
+		t.Fatal("esc left the menu up")
+	}
+
+	// With the menu stood down the @ is literal text, and enter means what
+	// it always means: start the session.
+	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if msg := cmd().(sessionStartedMsg); msg.err != nil {
+		t.Fatalf("starting with a literal @ failed: %v", msg.err)
+	}
+	if starter.command[len(starter.command)-1] != "@beta" {
+		t.Fatalf("session started with prompt %q, want the literal text", starter.command[len(starter.command)-1])
+	}
+	if starter.dir != "/projects/openagentview" {
+		t.Fatalf("session started in %q, want the board's directory", starter.dir)
+	}
+}
+
+func TestComposerAtInsideAWordIsNotAMention(t *testing.T) {
+	m := composerModelWithProjects(&fakeStarter{})
+
+	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	typeText(t, m, "email a@beta")
+
+	if got := m.composeMenuEntries(); len(got) != 0 {
+		t.Fatalf("an @ inside a word opened the menu: %v", got)
 	}
 }
 
@@ -2234,7 +2338,8 @@ func TestComposerDirSurvivesTheDraftBeingPutDown(t *testing.T) {
 	}}
 
 	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
-	press(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	typeText(t, m, "@alpha")
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	press(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
 
