@@ -789,17 +789,6 @@ func TestListDescriptionFallsBackToLocation(t *testing.T) {
 	}
 }
 
-func TestShortcutHelpUsesResponsiveHeight(t *testing.T) {
-	m := &Model{helpOpen: true, width: 80}
-	if got := m.footerHeight(); got != 6 {
-		t.Fatalf("narrow footer height = %d, want 6", got)
-	}
-	m.width = 140
-	if got := m.footerHeight(); got != 5 {
-		t.Fatalf("wide footer height = %d, want 5", got)
-	}
-}
-
 func TestMoveColumnSkipsEmptyStatusColumns(t *testing.T) {
 	now := time.Now()
 	m := &Model{
@@ -2514,6 +2503,21 @@ func TestProjectColumnsLeadWithWhatWantsAPerson(t *testing.T) {
 	if cards[0].ID != "waiting" || cards[1].ID != "working" || cards[2].ID != "settled" {
 		t.Fatalf("project column ordered %s, %s, %s — want needs-you, running, idle",
 			cards[0].ID, cards[1].ID, cards[2].ID)
+	}
+}
+
+func TestHelpFooterHeightMatchesItsLines(t *testing.T) {
+	m := &Model{helpOpen: true, width: 200}
+	if got := m.footerHeight(); got != len(m.shortcutHelpLines())+1 || got != 2 {
+		t.Fatalf("wide help takes %d rows, want 2", got)
+	}
+	m.width = 80
+	if got := m.footerHeight(); got != len(m.shortcutHelpLines())+1 || got != 3 {
+		t.Fatalf("narrow help takes %d rows, want 3", got)
+	}
+	m.helpOpen = false
+	if m.footerHeight() != 1 {
+		t.Fatal("the closed footer is one row")
 	}
 }
 
