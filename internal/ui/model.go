@@ -2423,13 +2423,15 @@ func (m *Model) renderComposer() string {
 	if m.composing {
 		tagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4B5FD"))
 	}
-	// The directory rides next to the agent as the task's second address:
-	// who runs it, then where. Shown as the project's name, since the full
-	// path would crowd out the input it is only labelling; @ in the input
-	// is how it changes.
-	dirTag := projectName(m.currentComposeDir())
-	tag := tagStyle.Render("["+agentTag+"]") + " " +
-		tagStyle.Render("["+dirTag+"]") + " "
+	// The directory shows only once an @ has pointed the task somewhere
+	// other than the board's own — that pick would otherwise be invisible,
+	// since accepting it strips the token from the text. It wears the @ it
+	// was picked with; a second bracketed tag read as a second agent.
+	tag := tagStyle.Render("["+agentTag+"]") + " "
+	dir := filepath.Clean(m.currentComposeDir())
+	if dir != filepath.Clean(m.workdir) {
+		tag += tagStyle.Render("@"+projectName(dir)) + " "
+	}
 
 	prompt := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#A78BFA")).
