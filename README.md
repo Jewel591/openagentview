@@ -152,9 +152,10 @@ Once `Ctrl+]` has stopped typing:
 
 Opening a tab drives the terminal's own scripting interface — AppleScript
 for Ghostty, iTerm2 and Terminal.app (macOS asks once for automation
-permission), the remote-control CLI for kitty and WezTerm. In a terminal the
-board cannot ask for a tab, going to a session falls back to taking over the
-board's window until the agent exits.
+permission), the remote-control CLI for kitty and WezTerm. kitty ships with
+remote control disabled, so it needs `allow_remote_control yes` in its
+config to count. In a terminal the board cannot ask for a tab, going to a
+session falls back to taking over the board's window until the agent exits.
 
 ## Data safety
 

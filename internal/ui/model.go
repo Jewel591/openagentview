@@ -1774,8 +1774,13 @@ func (m *Model) openSelectedInTab() tea.Cmd {
 	if m.opener == nil {
 		return m.resumeSelected()
 	}
+	// Only a resume runs in the session's directory. An attach cares about
+	// the pane, not the path — a workspace renamed or unmounted since must
+	// not stop a perfectly attachable session at the cd.
+	dir := selected.CWD
 	var command []string
 	if selected.TmuxPane != "" {
+		dir = ""
 		// A fresh tab's shell is never inside tmux, so the way in is always
 		// attach — never switch-client — with the session's window and pane
 		// selected first so the agent is what lands on screen.
@@ -1790,7 +1795,7 @@ func (m *Model) openSelectedInTab() tea.Cmd {
 		name, args := m.adapter.ResumeCommand(*selected)
 		command = append([]string{name}, args...)
 	}
-	opener, dir := m.opener, selected.CWD
+	opener := m.opener
 	m.status = "Opening in a new tab…"
 	return func() tea.Msg {
 		return tabOpenedMsg{err: opener.OpenTab(dir, command)}
@@ -2737,7 +2742,7 @@ func (m *Model) renderFooter() string {
 	if m.helpOpen {
 		return m.renderShortcutHelp()
 	}
-	help := "enter open · space preview · tab group · v layout · ? shortcuts"
+	help := "enter quick look · ctrl+enter open in tab · tab group · v layout · ? shortcuts"
 	if m.composing {
 		help = "enter start the session · tab switch agent" +
 			" · @ pick a project or path · esc put it down"

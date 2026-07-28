@@ -2032,6 +2032,11 @@ func TestCtrlEnterAttachesToAPaneSessionInATab(t *testing.T) {
 	if !strings.Contains(joined, "attach -t %7") || strings.Contains(joined, "switch-client") {
 		t.Fatalf("tab runs %q, want an attach to the session's pane", joined)
 	}
+	// An attach cares about the pane, not the path: a workspace gone stale
+	// since must not stop a perfectly attachable session at the cd.
+	if opener.dir != "" {
+		t.Fatalf("attach was given directory %q, want none", opener.dir)
+	}
 }
 
 func TestCtrlEnterRefusesASessionOpenElsewhere(t *testing.T) {

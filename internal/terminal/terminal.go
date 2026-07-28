@@ -25,7 +25,14 @@ type Opener struct {
 // fallback for that case rather than guessing at keystrokes blind.
 func Detect() *Opener {
 	if os.Getenv("KITTY_WINDOW_ID") != "" {
-		return &Opener{program: "kitty"}
+		// kitty ships with remote control off, and a request against it then
+		// fails outright. One probe at detection time decides honestly: a
+		// kitty that cannot be asked is a terminal the board does not know
+		// how to ask, and the in-window fallback applies.
+		if exec.Command("kitty", "@", "ls").Run() == nil {
+			return &Opener{program: "kitty"}
+		}
+		return nil
 	}
 	program := os.Getenv("TERM_PROGRAM")
 	switch program {
@@ -45,11 +52,17 @@ func Detect() *Opener {
 func (o *Opener) OpenTab(dir string, command []string) error {
 	switch o.program {
 	case "kitty":
-		args := append([]string{"@", "launch", "--type=tab", "--cwd", dir, "--"}, command...)
-		return run("kitty", args...)
+		args := []string{"@", "launch", "--type=tab"}
+		if dir != "" {
+			args = append(args, "--cwd", dir)
+		}
+		return run("kitty", append(append(args, "--"), command...)...)
 	case "WezTerm":
-		args := append([]string{"cli", "spawn", "--cwd", dir, "--"}, command...)
-		return run("wezterm", args...)
+		args := []string{"cli", "spawn"}
+		if dir != "" {
+			args = append(args, "--cwd", dir)
+		}
+		return run("wezterm", append(append(args, "--"), command...)...)
 	case "ghostty":
 		return o.openGhosttyTab(dir, command)
 	case "iTerm.app":
