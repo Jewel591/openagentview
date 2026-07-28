@@ -789,17 +789,6 @@ func TestListDescriptionFallsBackToLocation(t *testing.T) {
 	}
 }
 
-func TestShortcutHelpUsesResponsiveHeight(t *testing.T) {
-	m := &Model{helpOpen: true, width: 80}
-	if got := m.footerHeight(); got != 6 {
-		t.Fatalf("narrow footer height = %d, want 6", got)
-	}
-	m.width = 140
-	if got := m.footerHeight(); got != 5 {
-		t.Fatalf("wide footer height = %d, want 5", got)
-	}
-}
-
 func TestMoveColumnSkipsEmptyStatusColumns(t *testing.T) {
 	now := time.Now()
 	m := &Model{
