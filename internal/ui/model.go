@@ -294,6 +294,10 @@ type Model struct {
 	loading               bool
 	status                string
 	lastSync              time.Time
+	// animFrame drives the running marker's pulse; animating is whether the
+	// frame timer is armed, so refreshes do not stack a second one.
+	animFrame int
+	animating bool
 }
 
 // PaneController is the part of tmux Quick Look needs: a live mirror of a
@@ -416,7 +420,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "Dismissal cleanup failed: " + err.Error()
 			}
 		}
-		return m, nil
+		return m, m.startAnimIfNeeded()
 	case previewLoadedMsg:
 		if !m.previewOpen ||
 			msg.sessionID != m.previewSessionID ||
@@ -562,8 +566,56 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	case tea.PasteMsg:
 		return m.handlePaste(msg.Content)
+	case animTickMsg:
+		// The pulse runs only while the list is showing something that is
+		// actually working — kanban never draws the marker, so animating it
+		// there would be redrawing the board for nothing — and rests while
+		// Quick Look owns the screen. A refresh or a switch back to the
+		// list starts it up again.
+		if m.previewOpen || m.layout != layoutList || !m.anyRunningVisible() {
+			m.animating = false
+			return m, nil
+		}
+		m.animFrame++
+		return m, animTickCmd()
 	}
 	return m, nil
+}
+
+type animTickMsg time.Time
+
+// animFrameInterval paces the running marker's pulse: fast enough to read
+// as motion, slow enough that a board full of text is not redrawn for sport.
+const animFrameInterval = 300 * time.Millisecond
+
+func animTickCmd() tea.Cmd {
+	return tea.Tick(animFrameInterval, func(t time.Time) tea.Msg {
+		return animTickMsg(t)
+	})
+}
+
+// startAnimIfNeeded arms the pulse — after a refresh, or after the layout
+// switches to the list — when the list is up, something is running, and the
+// pulse is not already going; the animating flag is what keeps two callers
+// from stacking two timers.
+func (m *Model) startAnimIfNeeded() tea.Cmd {
+	if m.animating || m.previewOpen || m.layout != layoutList ||
+		!m.anyRunningVisible() {
+		return nil
+	}
+	m.animating = true
+	return animTickCmd()
+}
+
+func (m *Model) anyRunningVisible() bool {
+	query := strings.ToLower(strings.TrimSpace(m.query))
+	for _, session := range m.sessions {
+		if session.RuntimeStatus == agent.StatusRunning &&
+			m.sessionVisible(session, query) {
+			return true
+		}
+	}
+	return false
 }
 
 // handlePaste routes bracketed-paste text to whichever input holds the
@@ -684,6 +736,7 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		m.setLayout(layoutKanban)
 	case clickLayoutList:
 		m.setLayout(layoutList)
+		return m, m.startAnimIfNeeded()
 	case clickSearch:
 		m.searching = true
 	case clickComposer:
@@ -916,6 +969,7 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.toggleGroup()
 	case "v":
 		m.toggleLayout()
+		return m, m.startAnimIfNeeded()
 	case "?":
 		m.helpOpen = true
 	case "/", "s", "ctrl+k":
@@ -2312,19 +2366,33 @@ func (m *Model) listRowNameWidth() int {
 	return min(32, max(12, m.width/4))
 }
 
+// runningPulse is the running marker's animation: the asterisk swells and
+// settles, the way an agent at work feels from across the room.
+var runningPulse = []string{"✱", "✳", "✻", "✳"}
+
 func (m *Model) renderListRow(session agent.Session, selected bool) string {
 	marker := mutedStyle.Render("·")
+	active := true
 	switch session.RuntimeStatus {
 	case agent.StatusNeedsYou:
 		marker = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("✱")
 	case agent.StatusRunning:
-		marker = lipgloss.NewStyle().Foreground(lipgloss.Color("#34D399")).Render("✱")
+		marker = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#34D399")).
+			Render(runningPulse[m.animFrame%len(runningPulse)])
 	case agent.StatusError:
 		marker = lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171")).Render("✱")
+	default:
+		active = false
 	}
 
 	cursor := " "
-	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E2E8F0"))
+	// A settled session's title dims to the muted tone, so the rows still
+	// being worked stand out of a mixed list at a glance.
+	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))
+	if active {
+		nameStyle = nameStyle.Foreground(lipgloss.Color("#E2E8F0"))
+	}
 	if selected {
 		cursor = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#A78BFA")).
