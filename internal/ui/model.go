@@ -19,6 +19,7 @@ import (
 
 	"github.com/Jewel591/openagentview/internal/agent"
 	"github.com/Jewel591/openagentview/internal/dismiss"
+	"github.com/Jewel591/openagentview/internal/prefs"
 	"github.com/Jewel591/openagentview/internal/terminal"
 	"github.com/Jewel591/openagentview/internal/tmux"
 )
@@ -73,9 +74,11 @@ const (
 	paneInputRefreshInterval = 120 * time.Millisecond
 )
 
-// paneEscapeKey leaves typing and hands the board's keys back. It is deliberately
-// a keystroke no agent TUI uses, because everything else on the keyboard is
-// forwarded to the agent — including esc, which agents bind themselves.
+// paneEscapeKey leaves typing and hands the board's keys back. Esc is the
+// one key the mirror keeps for itself — agents bind it too, but modal editing
+// has meant "esc leaves the mode" for too long to spell it any other way, and
+// interrupting the agent stays a ctrl+c away. ctrl+] is kept as a quiet alias
+// for the hands already used to it.
 const paneEscapeKey = "ctrl+]"
 
 // Quick Look zooms out of the selected card the way the macOS original zooms
@@ -260,7 +263,11 @@ type Model struct {
 	// meaning every agent. Each header chip toggles its own entry, so the
 	// filter reads as "these agents" rather than a single choice cycled
 	// through — two agents at once is a question the board is asked often.
-	agentFilter         map[string]bool
+	agentFilter map[string]bool
+	// preferences remembers the grouping, layout and agent filter between
+	// runs. Nil means the state file could not be opened: the board still
+	// works, it just starts from its defaults next time.
+	preferences         *prefs.Store
 	detail              bool
 	helpOpen            bool
 	previewOpen         bool
@@ -386,6 +393,7 @@ func New(
 	starter SessionStarter,
 	launchers []Launcher,
 	dismissals *dismiss.Store,
+	preferences *prefs.Store,
 	pruneDismissed bool,
 ) *Model {
 	workdir, err := os.Getwd()
@@ -398,19 +406,66 @@ func New(
 	if detected := terminal.Detect(); detected != nil {
 		opener = detected
 	}
-	return &Model{
+	m := &Model{
 		adapter:        adapter,
 		opener:         opener,
 		panes:          panes,
 		starter:        starter,
 		launchers:      launchers,
 		dismissals:     dismissals,
+		preferences:    preferences,
 		pruneDismissed: pruneDismissed,
 		workdir:        workdir,
 		loading:        true,
 		width:          120,
 		height:         36,
 	}
+	m.applyPrefs()
+	return m
+}
+
+// applyPrefs starts the board the way it was left. Anything the file says
+// that the board cannot mean — a misspelled grouping, an agent that no
+// longer exists — falls back to the default silently: preferences are a
+// convenience, never an error.
+func (m *Model) applyPrefs() {
+	if m.preferences == nil {
+		return
+	}
+	saved := m.preferences.Load()
+	if saved.Group == "projects" {
+		m.group = groupProject
+	}
+	if saved.Layout == "list" {
+		m.layout = layoutList
+	}
+	if len(saved.Agents) > 0 {
+		m.agentFilter = map[string]bool{}
+		for _, name := range saved.Agents {
+			m.agentFilter[strings.ToLower(name)] = true
+		}
+	}
+}
+
+// savePrefs writes the board's arrangement as it is now. A failed write is
+// dropped rather than surfaced — the board in front of the user is already
+// right, and the only thing lost is the next start's head start.
+func (m *Model) savePrefs() {
+	if m.preferences == nil {
+		return
+	}
+	saved := prefs.Prefs{Group: "status", Layout: "kanban"}
+	if m.group == groupProject {
+		saved.Group = "projects"
+	}
+	if m.layout == layoutList {
+		saved.Layout = "list"
+	}
+	for name := range m.agentFilter {
+		saved.Agents = append(saved.Agents, name)
+	}
+	sort.Strings(saved.Agents)
+	_ = m.preferences.Save(saved)
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -1165,23 +1220,14 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	if m.previewOpen && m.paneInput {
 		switch stroke {
-		case paneEscapeKey:
-			// Esc belongs to the agent — codex clears its composer with it and
-			// edits the previous message with esc-esc — so the way out of typing
-			// is the one keystroke no agent TUI binds.
+		case "esc", paneEscapeKey:
+			// Esc leaves typing, nothing more: the window stays up, back in
+			// browse mode where space closes it. The cost is that esc cannot
+			// be typed at the agent — ctrl+c still reaches it for interrupts.
 			m.paneInput = false
 			return m, nil
-		case " ", "space":
-			// Space opens and closes Quick Look everywhere else on the board and
-			// keeps doing so here, which costs the space bar: a typed space is
-			// ctrl+space.
-			m.previewOpen = false
-			m.paneInput = false
-			return m, nil
-		case "ctrl+space", "ctrl+@":
-			// Terminals send NUL for ctrl+space, which some report as ctrl+@.
-			return m, m.sendPaneText(" ")
 		}
+		// Everything else — space included — is typing and goes to the agent.
 		return m, m.sendToPane(key)
 	}
 
@@ -1380,11 +1426,10 @@ func (m *Model) openQuickLook() tea.Cmd {
 	// answer: it shows the prompt the agent is blocked on, which never reaches
 	// the rollout log at all.
 	m.paneView = m.canMirrorPane(session)
-	// Mirroring a live agent is only half the point — the other half is
-	// answering it, so a mirrored pane opens ready to type rather than behind a
-	// mode. The cost is that the board's single-key shortcuts belong to the
-	// agent until ctrl+] gives them back, which the footer says outright.
-	m.paneInput = m.paneView
+	// The window opens looking, not typing, so the space bar that opened it
+	// closes it again — the macOS Quick Look rhythm. Answering the agent is
+	// one i away, and the footer says so.
+	m.paneInput = false
 	// The board behind the window is captured after the view is decided, so the
 	// backdrop is cut for the window that is actually about to be drawn.
 	m.setPreviewBase(m.renderBase())
@@ -1419,7 +1464,9 @@ func (m *Model) togglePaneView() tea.Cmd {
 		return nil
 	}
 	m.paneView = !m.paneView
-	m.paneInput = m.paneView
+	// Switching views is a way of looking, not an intent to speak: typing
+	// stays behind i on the pane side too.
+	m.paneInput = false
 	m.previewLoading = true
 	m.previewScrollBack = 0
 	m.previewMessageLimit = previewMessagePage
@@ -1450,10 +1497,6 @@ func (m *Model) sendToPane(key tea.KeyPressMsg) tea.Cmd {
 	if session == nil || !m.canMirrorPane(*session) {
 		return nil
 	}
-	pane := session.TmuxPane
-	panes := m.panes
-	generation := m.previewGeneration
-
 	if text := key.Key().Text; text != "" {
 		return m.sendPaneText(text)
 	}
@@ -1461,6 +1504,18 @@ func (m *Model) sendToPane(key tea.KeyPressMsg) tea.Cmd {
 	if !ok {
 		return nil
 	}
+	return m.sendPaneKey(name)
+}
+
+// sendPaneKey sends one named tmux key to the mirrored pane.
+func (m *Model) sendPaneKey(name string) tea.Cmd {
+	session := m.previewedSession()
+	if session == nil || !m.canMirrorPane(*session) {
+		return nil
+	}
+	pane := session.TmuxPane
+	panes := m.panes
+	generation := m.previewGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -1763,6 +1818,7 @@ func (m *Model) toggleAgentFilter(name string) {
 		m.agentFilter[name] = true
 	}
 	m.restoreSelection(selected)
+	m.savePrefs()
 }
 
 // toggleAgentAt names the chip a key or a click aimed at by its place in the
@@ -1785,6 +1841,7 @@ func (m *Model) clearAgentFilter() {
 	}
 	m.agentFilter = nil
 	m.restoreSelection(selected)
+	m.savePrefs()
 }
 
 func (m *Model) toggleGroup() {
@@ -1800,6 +1857,7 @@ func (m *Model) setGroup(group boardGroup) {
 	m.group = group
 	m.column, m.row = 0, 0
 	m.clampSelection()
+	m.savePrefs()
 }
 
 // toggleLayout redraws the same groups the other way, so the selection is a
@@ -1818,6 +1876,7 @@ func (m *Model) setLayout(layout boardLayout) {
 	}
 	m.layout = layout
 	m.clampSelection()
+	m.savePrefs()
 }
 
 func (m *Model) moveColumn(delta int) {
@@ -1936,18 +1995,18 @@ const composeMenuMax = 6
 // past the bottom of the terminal.
 const minBoardHeight = 5
 
-// A card's proportions, in terminal cells: three lines of content and the
-// border around them, with one row between cards. The screen's job is to hold
-// as much of the fleet as it can at once — a card that spends rows on air is
-// a session someone has to scroll to find.
+// A card's proportions, in terminal cells: four lines of content — meta, two
+// title rows, one status row — and the border around them, with one row
+// between cards. The title always gets its second row, blank when unneeded, so
+// every card is the same height and a column reflows without measuring.
 const (
-	cardHeight = 5
+	cardHeight = 6
 	cardStride = cardHeight + 1
 	// compactCardHeight is the same card with the gap after it given up, for
 	// columns too short to hold even one card and its breathing room.
 	compactCardHeight = cardHeight
 	cardChrome        = 4 // two border columns and one of padding on each side
-	maxColumnWidth    = 52
+	maxColumnWidth    = 38
 )
 
 // composeTextEdited is every edit's bookkeeping: the entries under the menu
@@ -2813,7 +2872,7 @@ func (m *Model) renderBoard() string {
 		return m.renderCompactBoard(columns, availableHeight)
 	}
 
-	gap := 2
+	gap := 3
 	maxVisible := max(1, m.width/24)
 	maxVisible = min(maxVisible, len(columns))
 	start := m.column - maxVisible/2
@@ -3129,8 +3188,14 @@ func (m *Model) renderListRow(session agent.Session, selected bool) string {
 	case agent.StatusNeedsYou:
 		marker = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("✱")
 	case agent.StatusRunning:
+		// The pulse wears the agent's own color, so a mixed list says who is
+		// working without reading a single row.
+		pulseColor, ok := agentColors[strings.ToLower(session.Agent)]
+		if !ok {
+			pulseColor = "#34D399"
+		}
 		marker = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#34D399")).
+			Foreground(lipgloss.Color(pulseColor)).
 			Render(runningPulse[m.animFrame%len(runningPulse)])
 	case agent.StatusError:
 		marker = lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171")).Render("✱")
@@ -3309,29 +3374,29 @@ func (m *Model) renderColumn(
 		Render(lipgloss.JoinVertical(lipgloss.Left, header, body))
 }
 
-// agentColors is each agent's own hue, taken from its brand and dimmed a step
-// from the palette the rest of the board uses: the badge is a label to
-// recognize, not a signal to react to — attention is the amber dot's job.
+// agentColors is each agent's own theme hue: claude in Anthropic's coral,
+// codex in blue, grok in gold. The badge is a label to recognize, not a
+// signal to react to — attention is the amber dot's job — but the label keeps
+// its color even on a settled card: which agent it was is the one thing a
+// card never stops saying.
 var agentColors = map[string]string{
-	"claude": "#C97B5A",
-	"codex":  "#8FA3B8",
-	"grok":   "#8B7BC4",
+	"claude": "#D97757",
+	"codex":  "#4E9EFF",
+	"grok":   "#E0A84E",
 }
 
 // agentBadge is the agent's name at the card's top-left, in the agent's own
 // color so two otherwise identical cards tell apart at a glance. Color is the
 // whole badge: neither a filled block nor a drawn outline earns the width and
-// weight it costs on the card's least important line. A settled session keeps
-// the name and gives up the color — which agent it was still matters, but not
-// enough to compete with the sessions that are still moving.
-func agentBadge(s agent.Session, live bool) string {
+// weight it costs on the card's least important line.
+func agentBadge(s agent.Session) string {
 	color, ok := agentColors[strings.ToLower(s.Agent)]
-	if !ok || !live {
+	if !ok {
 		color = "#475569"
 	}
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color(color)).
-		Render(strings.ToUpper(s.Agent))
+		Render(strings.ToLower(s.Agent))
 }
 
 func (m *Model) renderCard(
@@ -3372,7 +3437,7 @@ func (m *Model) renderCard(
 	// pane when there is no branch to name. Grouped by project the column
 	// header has already said which project this is, so the card drops it
 	// and spends the width on the branch instead.
-	badge := agentBadge(s, live)
+	badge := agentBadge(s)
 	dot := ""
 	if s.RuntimeStatus == agent.StatusNeedsYou {
 		dot = " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("●")
@@ -3397,7 +3462,7 @@ func (m *Model) renderCard(
 			lipgloss.NewStyle().Foreground(lipgloss.Color("#475569")).Render(right)
 	}
 
-	title := truncate(s.Title, inner)
+	titleRows := wrapTitleRows(s.Title, inner)
 
 	// The bottom line is what the session is doing or asking, amber when it
 	// is a question waiting on a person. A session whose preview only repeats
@@ -3431,13 +3496,46 @@ func (m *Model) renderCard(
 			// reads as three loose lines rather than as one card.
 			meta + "\n" +
 				// The title is the card: always bold, always the brightest
-				// line it has. Selection is the border's job.
+				// line it has. Selection is the border's job. It always gets
+				// two rows — a one-line title leaves the second blank rather
+				// than shrinking the card.
 				lipgloss.NewStyle().
 					Bold(true).
 					Foreground(lipgloss.Color(titleColor)).
-					Render(title) +
+					Render(titleRows[0]) +
+				"\n" +
+				lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color(titleColor)).
+					Render(titleRows[1]) +
 				"\n" + detailStyle.Render(truncate(detail, inner)),
 		)
+}
+
+// wrapTitleRows lays a title over exactly two rows of the given width: broken
+// at a word boundary when it can be, hard-truncated at the end of the second
+// row when even two rows cannot hold it.
+func wrapTitleRows(title string, width int) [2]string {
+	title = strings.Join(strings.Fields(title), " ")
+	if lipgloss.Width(title) <= width {
+		return [2]string{title, ""}
+	}
+	words := strings.Fields(title)
+	first := ""
+	for i, word := range words {
+		candidate := word
+		if first != "" {
+			candidate = first + " " + word
+		}
+		if lipgloss.Width(candidate) > width && first != "" {
+			return [2]string{
+				truncate(first, width),
+				truncate(strings.Join(words[i:], " "), width),
+			}
+		}
+		first = candidate
+	}
+	return [2]string{truncate(title, width), ""}
 }
 
 // emptyColumnBox is what an empty column holds instead of cards: a dashed
@@ -3922,14 +4020,12 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 	switch {
 	case m.paneInput && selected != nil:
 		typing := "● typing into " + selected.TmuxTarget +
-			" · wheel up reads history · ctrl+] then t opens transcript" +
-			" · esc goes to agent" +
-			" · ctrl+space types a space · space closes"
+			" · wheel up reads history" +
+			" · esc stops typing · ctrl+c interrupts agent"
 		if history != "" {
 			typing = history + " · wheel up continues in transcript" +
 				" · typing into " + selected.TmuxTarget +
-				" · esc goes to agent · ctrl+space types a space" +
-				" · space closes"
+				" · esc stops typing · ctrl+c interrupts agent"
 		}
 		return lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FBBF24")).

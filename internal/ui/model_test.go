@@ -16,6 +16,7 @@ import (
 
 	"github.com/Jewel591/openagentview/internal/agent"
 	"github.com/Jewel591/openagentview/internal/dismiss"
+	"github.com/Jewel591/openagentview/internal/prefs"
 	"github.com/Jewel591/openagentview/internal/tmux"
 )
 
@@ -175,10 +176,10 @@ func TestQuickLookMirrorsTheTmuxPaneOfALiveSession(t *testing.T) {
 	if !m.paneView {
 		t.Fatal("Quick Look on a tmux session did not mirror its pane")
 	}
-	// Mirroring is only half the point: the overlay opens ready to answer the
-	// agent rather than behind a mode.
-	if !m.paneInput {
-		t.Fatal("the mirrored pane did not open ready to type into")
+	// The overlay opens browsing, so the space that opened it can close it
+	// again; answering the agent is behind i.
+	if m.paneInput {
+		t.Fatal("the mirrored pane opened typing instead of browsing")
 	}
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
 	settleQuickLook(m)
@@ -316,6 +317,12 @@ func TestMirrorScrollContinuesPastAnAlternateScreenIntoTranscript(t *testing.T) 
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
 	settleQuickLook(m)
+	// Typing when the pane overflows into the transcript, so the return trip
+	// has a typing state worth restoring.
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
+	if !m.paneInput {
+		t.Fatal("i did not start typing into the pane")
+	}
 
 	maxScroll := m.previewMaxScrollBack()
 	if maxScroll <= 0 {
@@ -500,7 +507,6 @@ func TestMirrorCanReachHistoryPastTwoThousandLines(t *testing.T) {
 	m := tmuxModel(panes)
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	m.paneInput = false
 
 	cmd := press(t, m, tea.KeyPressMsg{Code: 'g', Text: "g"})
 	if cmd == nil {
@@ -571,6 +577,7 @@ func TestTypingIntoAPaneSendsTextAndReturnSeparately(t *testing.T) {
 	m := tmuxModel(panes)
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
 
 	for _, key := range []tea.KeyPressMsg{
 		{Code: 'y', Text: "y"},
@@ -591,73 +598,64 @@ func TestTypingIntoAPaneSendsTextAndReturnSeparately(t *testing.T) {
 	}
 }
 
-// Esc belongs to the agent while typing — codex binds it — so leaving typing
-// is a keystroke no agent TUI uses.
-func TestCtrlBracketLeavesTypingWithoutClosingQuickLook(t *testing.T) {
+// The mirror follows the macOS Quick Look rhythm: space opens browsing and
+// space closes again. Typing sits behind i, where every key — space and enter
+// included — belongs to the agent, and esc steps back out to browsing.
+func TestSpaceTogglesTheMirrorAndTypingSitsBehindI(t *testing.T) {
 	panes := &fakePanes{lines: []string{"waiting"}}
 	m := tmuxModel(panes)
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-
-	// Esc goes to the agent, not to the overlay.
-	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if cmd == nil {
-		t.Fatal("esc was swallowed instead of reaching the agent")
-	}
-	cmd()
-	if !m.paneInput || !m.previewOpen {
-		t.Fatal("esc stopped typing instead of reaching the agent")
-	}
-	if len(panes.sent) != 1 || !strings.HasSuffix(panes.sent[0], "key:Escape") {
-		t.Fatalf("sent %v, want an Escape for the agent", panes.sent)
-	}
-
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
-	if m.paneInput {
-		t.Fatal("ctrl+] did not stop typing")
-	}
-	if !m.previewOpen {
-		t.Fatal("ctrl+] closed Quick Look instead of stopping typing")
-	}
 
 	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
 	if !m.paneInput {
-		t.Fatal("i did not start typing again")
+		t.Fatal("i did not start typing into the pane")
 	}
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
 
+	// While typing, spaces are text for the agent, not the close gesture.
+	for _, key := range []tea.KeyPressMsg{
+		{Code: ' ', Text: " "},
+		{Code: 'a', Text: "a"},
+		{Code: ' ', Text: " "},
+	} {
+		cmd := press(t, m, key)
+		if cmd == nil {
+			t.Fatalf("%q did not reach the pane", key.Text)
+		}
+		cmd()
+	}
+	if !m.previewOpen || !m.paneInput {
+		t.Fatal("typed spaces closed Quick Look instead of reaching the agent")
+	}
+	if len(panes.sent) != 3 || !strings.HasSuffix(panes.sent[2], "text: ") {
+		t.Fatalf("sent %v, want three typed characters", panes.sent)
+	}
+
+	// Esc leaves typing without closing the window or reaching the agent.
 	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m.previewOpen {
-		t.Fatal("esc did not close Quick Look once typing had stopped")
+	if m.paneInput {
+		t.Fatal("esc did not stop typing")
 	}
-}
-
-// Space opens and closes Quick Look everywhere else on the board, and keeps
-// doing so inside a mirrored pane. The space bar is the price: a typed space
-// is ctrl+space.
-func TestSpaceClosesTheMirrorAndCtrlSpaceTypesOne(t *testing.T) {
-	panes := &fakePanes{lines: []string{"waiting"}}
-	m := tmuxModel(panes)
-	load := m.openQuickLook()
-	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-
-	cmd := press(t, m, tea.KeyPressMsg{Code: ' ', Mod: tea.ModCtrl})
-	if cmd == nil {
-		t.Fatal("ctrl+space did not reach the pane")
-	}
-	cmd()
 	if !m.previewOpen {
-		t.Fatal("ctrl+space closed Quick Look instead of typing a space")
+		t.Fatal("esc closed Quick Look instead of stopping typing")
 	}
-	if len(panes.sent) != 1 || !strings.HasSuffix(panes.sent[0], "text: ") {
-		t.Fatalf("sent %v, want a literal space", panes.sent)
+	if len(panes.sent) != 3 {
+		t.Fatalf("sent %v, want the esc kept from the agent", panes.sent)
 	}
 
-	press(t, m, tea.KeyPressMsg{Code: ' ', Text: " "})
-	if m.previewOpen || m.paneInput {
-		t.Fatal("space did not close the mirror while typing")
+	// ctrl+] stays as an alias for the hands already trained on it.
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
+	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
+	if m.paneInput || !m.previewOpen {
+		t.Fatal("ctrl+] did not step back out to browsing")
 	}
-	if len(panes.sent) != 1 {
+
+	// Browsing again, the space that opened the window closes it.
+	press(t, m, tea.KeyPressMsg{Code: ' ', Text: " "})
+	if m.previewOpen {
+		t.Fatal("space did not close Quick Look from browse mode")
+	}
+	if len(panes.sent) != 3 {
 		t.Fatalf("sent %v, want the closing space kept out of the pane", panes.sent)
 	}
 }
@@ -666,8 +664,6 @@ func TestToggleSwapsBetweenPaneAndTranscript(t *testing.T) {
 	m := tmuxModel(&fakePanes{lines: []string{"live screen"}})
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	// While typing, t belongs to the agent; ctrl+] hands the board's keys back.
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
 
 	cmd := press(t, m, tea.KeyPressMsg{Code: 't', Text: "t"})
 	if m.paneView {
@@ -726,6 +722,13 @@ func TestMirrorShowsTheAgentsCursorWhileTyping(t *testing.T) {
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
 	settleQuickLook(m)
 
+	// Browsing is not typing: the cursor would claim keys go somewhere they do
+	// not.
+	if m.View().Cursor != nil {
+		t.Fatal("the cursor was on before typing started")
+	}
+
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
 	cursor := m.View().Cursor
 	if cursor == nil {
 		t.Fatal("the mirror showed no cursor while typing into the agent")
@@ -734,9 +737,7 @@ func TestMirrorShowsTheAgentsCursorWhileTyping(t *testing.T) {
 		t.Fatalf("cursor = %d,%d, want 2,%d", cursor.X, cursor.Y, quickLookBodyRow)
 	}
 
-	// Browsing is not typing: the cursor would claim keys go somewhere they do
-	// not.
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.View().Cursor != nil {
 		t.Fatal("the cursor stayed on after typing stopped")
 	}
@@ -756,6 +757,7 @@ func TestNarrowPaneIsMirroredInAWindow(t *testing.T) {
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
 	settleQuickLook(m)
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
 
 	if !m.paneFloats() {
 		t.Fatal("an 80-column pane filled a 120-column terminal")
@@ -1188,6 +1190,52 @@ func TestListDescriptionFallsBackToLocation(t *testing.T) {
 	session.Preview = "Fix the parser, then add a regression test"
 	if got := listDescription(session, true); got != session.Preview {
 		t.Fatalf("description = %q, want the prompt", got)
+	}
+}
+
+// The board comes back arranged the way it was left: grouping, layout and
+// the agent filter all survive one model being torn down and another built
+// on the same state file.
+func TestBoardArrangementSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefs.json")
+	store, err := prefs.OpenAt(path)
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+	m := tmuxModel(&fakePanes{})
+	m.preferences = store
+	m.toggleGroup()
+	m.toggleLayout()
+	m.toggleAgentFilter("codex")
+
+	reopened, err := prefs.OpenAt(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	next := tmuxModel(&fakePanes{})
+	next.preferences = reopened
+	next.applyPrefs()
+	if next.group != groupProject {
+		t.Fatal("the grouping did not survive a restart")
+	}
+	if next.layout != layoutList {
+		t.Fatal("the layout did not survive a restart")
+	}
+	if len(next.agentFilter) != 1 || !next.agentFilter["codex"] {
+		t.Fatalf("agentFilter = %v, want codex alone", next.agentFilter)
+	}
+
+	// Toggling everything back leaves the file at the defaults again.
+	next.toggleGroup()
+	next.toggleLayout()
+	next.toggleAgentFilter("codex")
+	final, err := prefs.OpenAt(path)
+	if err != nil {
+		t.Fatalf("final reopen: %v", err)
+	}
+	saved := final.Load()
+	if saved.Group != "status" || saved.Layout != "kanban" || len(saved.Agents) != 0 {
+		t.Fatalf("saved = %+v, want the defaults", saved)
 	}
 }
 
