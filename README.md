@@ -136,8 +136,7 @@ original does — the same `Space` that opened it closes it again:
 | Key | Action |
 | --- | --- |
 | `↑` / `↓`, `PgUp` / `PgDn`, `g` / `G` | Scroll the pane or transcript |
-| `t` | Switch between the live pane and the stored transcript |
-| `i` | Start typing into the agent |
+| `i` (or a click on the window) | Start typing into the agent |
 | `Enter` | Open the session in a new terminal tab |
 | `Esc` / `Space` | Close Quick Look |
 
@@ -150,9 +149,10 @@ While typing, every key goes to the agent — `Space` and `Enter` included:
 
 Full-screen agent TUIs use the terminal's alternate screen, which tmux keeps
 only as a current frame rather than scrollback. Quick Look labels those mirrors
-`current screen only`; switch to the session transcript to read earlier
-conversation content. Ordinary tmux history is loaded in growing pages as it
-is needed, up to the pane's actual history limit.
+`current screen only`; scrolling past the top continues seamlessly into the
+session transcript for earlier conversation content, and scrolling back down
+past its bottom returns to the live pane. Ordinary tmux history is loaded in
+growing pages as it is needed, up to the pane's actual history limit.
 
 Opening a tab drives the terminal's own scripting interface — AppleScript
 for Ghostty, iTerm2 and Terminal.app (macOS asks once for automation

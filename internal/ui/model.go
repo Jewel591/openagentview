@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,16 +80,8 @@ const (
 // for the hands already used to it.
 const paneEscapeKey = "ctrl+]"
 
-// Quick Look zooms out of the selected card the way the macOS original zooms
-// out of a file icon: briefly, easing out, and from the thing that was asked
-// about. Long enough to read as motion, short enough to never be waited on.
-const (
-	previewOpenDuration      = 160 * time.Millisecond
-	previewOpenFrameInterval = time.Second / 60
-)
-
 // screenRect is a rectangle in terminal cells, used to remember where the
-// selected card sits and to grow the overlay out of it.
+// selected card sits on screen.
 type screenRect struct {
 	x, y, width, height int
 }
@@ -160,11 +151,6 @@ type paneLoadedMsg struct {
 }
 
 type paneRefreshMsg struct {
-	generation uint64
-}
-
-// previewAnimMsg is one frame of the overlay's opening zoom.
-type previewAnimMsg struct {
 	generation uint64
 }
 
@@ -333,19 +319,11 @@ type Model struct {
 	quickLookRect screenRect
 	detailRect    screenRect
 	// selectedRect is where the selected card sat the last time the board was
-	// drawn, which is the spot Quick Look grows out of.
-	selectedRect    screenRect
-	previewAnimFrom screenRect
-	previewOpenedAt time.Time
-	// previewAnimGeneration is deliberately separate from previewGeneration:
-	// the content generation is bumped whenever a different load starts —
-	// toggling the transcript, restarting the poll — and the zoom must ride
-	// out those bumps rather than freeze on its first frame.
-	previewAnimGeneration uint64
-	previewAnimating      bool
-	loading               bool
-	status                string
-	lastSync              time.Time
+	// drawn.
+	selectedRect screenRect
+	loading      bool
+	status       string
+	lastSync     time.Time
 	// animFrame drives the running marker's pulse; animating is whether the
 	// frame timer is armed, so refreshes do not stack a second one.
 	animFrame int
@@ -724,17 +702,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Opened in a new tab"
 		}
 		return m, m.refreshCmd()
-	case previewAnimMsg:
-		if !m.previewOpen ||
-			!m.previewAnimating ||
-			msg.generation != m.previewAnimGeneration {
-			return m, nil
-		}
-		if time.Since(m.previewOpenedAt) >= previewOpenDuration {
-			m.previewAnimating = false
-			return m, nil
-		}
-		return m, m.previewAnimTick()
 	case tea.MouseWheelMsg:
 		return m.handleWheel(msg)
 	case tea.MouseClickMsg:
@@ -1041,8 +1008,11 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		if !m.quickLookRect.contains(msg.X, msg.Y) {
 			m.previewOpen = false
 			m.paneInput = false
+			return m, nil
 		}
-		return m, nil
+		// A click on the mirror itself aims at the agent's own input line,
+		// so it starts typing the way i does.
+		return m, m.startPaneTyping()
 	}
 	if m.helpOpen {
 		m.helpOpen = false
@@ -1235,18 +1205,8 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch stroke {
 		case "ctrl+c", "ctrl+q", "q":
 			return m, tea.Quit
-		case "t":
-			return m, m.togglePaneView()
 		case "i":
-			if m.paneView {
-				m.paneInput = true
-				// The poll is running at the slower interval; restart it so the
-				// first keystroke does not wait out the tick already in flight.
-				m.previewGeneration++
-				if session := m.previewedSession(); session != nil {
-					return m, m.loadPane(*session, m.previewGeneration, true)
-				}
-			}
+			return m, m.startPaneTyping()
 		case "esc", " ", "space":
 			m.previewOpen = false
 		case "up", "k":
@@ -1434,58 +1394,30 @@ func (m *Model) openQuickLook() tea.Cmd {
 	// backdrop is cut for the window that is actually about to be drawn.
 	m.setPreviewBase(m.renderBase())
 	m.rebuildPreviewLayout()
-	m.previewAnimFrom = m.selectedRect
-	m.previewOpenedAt = time.Now()
-	m.previewAnimGeneration++
-	m.previewAnimating = true
-	load := m.loadPreview(session, m.previewGeneration)
 	if m.paneView {
-		load = m.loadPane(session, m.previewGeneration, true)
+		return m.loadPane(session, m.previewGeneration, true)
 	}
-	return tea.Batch(load, m.previewAnimTick())
-}
-
-func (m *Model) previewAnimTick() tea.Cmd {
-	generation := m.previewAnimGeneration
-	return tea.Tick(previewOpenFrameInterval, func(time.Time) tea.Msg {
-		return previewAnimMsg{generation: generation}
-	})
+	return m.loadPreview(session, m.previewGeneration)
 }
 
 func (m *Model) canMirrorPane(session agent.Session) bool {
 	return m.panes != nil && session.TmuxPane != ""
 }
 
-// togglePaneView swaps between the live pane and the stored transcript, and
-// starts whichever poll the new side needs.
-func (m *Model) togglePaneView() tea.Cmd {
-	session := m.previewedSession()
-	if session == nil || !m.canMirrorPane(*session) {
+// startPaneTyping is what i and a click on the mirror both mean: hand the
+// keyboard to the agent. On anything but a live mirror it means nothing.
+func (m *Model) startPaneTyping() tea.Cmd {
+	if !m.paneView || m.paneInput {
 		return nil
 	}
-	m.paneView = !m.paneView
-	// Switching views is a way of looking, not an intent to speak: typing
-	// stays behind i on the pane side too.
-	m.paneInput = false
-	m.previewLoading = true
-	m.previewScrollBack = 0
-	m.previewMessageLimit = previewMessagePage
-	m.previewLoadedLimit = 0
-	m.previewTranscriptExhausted = false
-	m.previewTranscriptLoadingMore = false
-	m.previewPendingScrollBack = 0
-	m.previewTranscriptReturnsToPane = false
-	m.previewReturnPaneInput = false
-	m.paneLoaded = false
-	m.paneHistoryRequested = 0
-	m.paneAnchor = 0
+	m.paneInput = true
+	// The poll is running at the slower interval; restart it so the first
+	// keystroke does not wait out the tick already in flight.
 	m.previewGeneration++
-	if m.paneView {
+	if session := m.previewedSession(); session != nil {
 		return m.loadPane(*session, m.previewGeneration, true)
 	}
-	m.previewMessages = nil
-	m.rebuildPreviewLayout()
-	return m.loadPreview(*session, m.previewGeneration)
+	return nil
 }
 
 // sendToPane forwards one keystroke to the mirrored pane. Text and named keys
@@ -2007,6 +1939,10 @@ const (
 	compactCardHeight = cardHeight
 	cardChrome        = 4 // two border columns and one of padding on each side
 	maxColumnWidth    = 38
+	// minColumnWidth is the narrowest a kanban column is allowed to get
+	// before columns start dropping off-screen instead: below it a card
+	// cannot say what its session is about, which defeats the board.
+	minColumnWidth = 30
 )
 
 // composeTextEdited is every edit's bookkeeping: the entries under the menu
@@ -2384,7 +2320,6 @@ type column struct {
 	title   string
 	status  agent.RuntimeStatus
 	project string
-	color   string
 }
 
 func (m *Model) columns() []column {
@@ -2394,9 +2329,9 @@ func (m *Model) columns() []column {
 	// The group that wants a person comes first, in both layouts: the list is
 	// read top to bottom, and the board is scanned left to right.
 	columns := []column{
-		{title: "NEEDS YOU", status: agent.StatusNeedsYou, color: "#F59E0B"},
-		{title: "RUNNING", status: agent.StatusRunning, color: "#34D399"},
-		{title: "IDLE", status: agent.StatusIdle, color: "#60A5FA"},
+		{title: "NEEDS YOU", status: agent.StatusNeedsYou},
+		{title: "RUNNING", status: agent.StatusRunning},
+		{title: "IDLE", status: agent.StatusIdle},
 	}
 	// Error means openagentview could not read a session's log — a fault of the
 	// machine, not a stage of an agent's life — so the group only exists while
@@ -2406,7 +2341,6 @@ func (m *Model) columns() []column {
 		columns = append(columns, column{
 			title:  "ERROR",
 			status: agent.StatusError,
-			color:  "#F87171",
 		})
 	}
 	return columns
@@ -2447,13 +2381,11 @@ func (m *Model) projectColumns() []column {
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].updatedAt.After(sorted[j].updatedAt)
 	})
-	colors := []string{"#60A5FA", "#A78BFA", "#34D399", "#F59E0B", "#F472B6", "#22D3EE"}
 	columns := make([]column, 0, len(sorted))
-	for i, project := range sorted {
+	for _, project := range sorted {
 		columns = append(columns, column{
 			title:   projectName(project.path),
 			project: project.path,
-			color:   colors[i%len(colors)],
 		})
 	}
 	return columns
@@ -2642,8 +2574,8 @@ var (
 			Foreground(lipgloss.Color("#64748B"))
 	activeTabStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#0F172A")).
-			Background(lipgloss.Color("#A78BFA")).
+			Foreground(lipgloss.Color("#F8FAFC")).
+			Background(lipgloss.Color("#334155")).
 			Padding(0, 1)
 	tabStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#94A3B8")).
@@ -2687,7 +2619,7 @@ func (m *Model) renderHeader() string {
 			Render("Search: " + m.query + "█")
 	} else if m.query != "" {
 		search = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#C4B5FD")).
+			Foreground(lipgloss.Color("#CBD5E1")).
 			Render("filter: " + m.query)
 	}
 
@@ -2873,7 +2805,10 @@ func (m *Model) renderBoard() string {
 	}
 
 	gap := 3
-	maxVisible := max(1, m.width/24)
+	// Only as many columns as the minimum width allows are shown at once;
+	// the rest wait off-screen, and the window slides to keep the selected
+	// column visible. Squeezing every column in reads as none of them.
+	maxVisible := max(1, (m.width+gap)/(minColumnWidth+gap))
 	maxVisible = min(maxVisible, len(columns))
 	start := m.column - maxVisible/2
 	start = max(0, min(start, len(columns)-maxVisible))
@@ -2882,7 +2817,7 @@ func (m *Model) renderBoard() string {
 	// card stretched the whole of an ultrawide terminal reads as a rule with
 	// text on it rather than as a card, and its three lines are then a long
 	// way apart for how little each one says.
-	columnWidth := max(18, (m.width-gap*(maxVisible-1))/maxVisible)
+	columnWidth := max(minColumnWidth, (m.width-gap*(maxVisible-1))/maxVisible)
 	columnWidth = min(columnWidth, maxColumnWidth)
 	// Once the columns stop growing they are centered rather than left in
 	// place: an even margin on both sides reads as a deliberate measure, a
@@ -3081,7 +3016,7 @@ func (m *Model) renderList(columns []column, height int) string {
 		}
 		lines = append(lines, lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color(column.color)).
+			Foreground(lipgloss.Color("#CBD5E1")).
 			Render(column.title)+mutedStyle.Render(fmt.Sprintf("  %d", len(cards))))
 		for row, card := range cards {
 			selected := index == m.column && row == m.row
@@ -3171,6 +3106,10 @@ func (m *Model) renderListSummary(columns []column) string {
 // being the two shapes it takes).
 const listAgeWidth = 4
 
+// listProjectWidth is the fixed column a status-grouped row names its project
+// in, so the projects line up down the list.
+const listProjectWidth = 14
+
 // listRowNameWidth is the column the titles line up in. Descriptions only read
 // as a column of their own if the titles before them end at one place.
 func (m *Model) listRowNameWidth() int {
@@ -3212,7 +3151,7 @@ func (m *Model) renderListRow(session agent.Session, selected bool) string {
 	}
 	if selected {
 		cursor = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#A78BFA")).
+			Foreground(lipgloss.Color("#F8FAFC")).
 			Render("❯")
 		nameStyle = nameStyle.Bold(true).Foreground(lipgloss.Color("#F8FAFC"))
 	}
@@ -3227,7 +3166,15 @@ func (m *Model) renderListRow(session agent.Session, selected bool) string {
 	age := truncate(shortAge(session.UpdatedAt), listAgeWidth)
 	age = strings.Repeat(" ", max(0, listAgeWidth-lipgloss.Width(age))) + age
 
-	line := cursor + " " + marker + " " + nameStyle.Render(name)
+	project := ""
+	if m.group != groupProject {
+		// Grouped by status no heading names the project, so every row
+		// carries its own, in a fixed column the eye can walk down.
+		cell := truncate(projectName(session.CWD), listProjectWidth)
+		cell += strings.Repeat(" ", max(0, listProjectWidth-lipgloss.Width(cell)))
+		project = mutedStyle.Render(cell) + " "
+	}
+	line := cursor + " " + marker + " " + project + nameStyle.Render(name)
 	// What is left after the row's own indent, the two-space gutter before the
 	// description, the space before the age, and the column the list is padded
 	// by — plus one more so the age never sits against the terminal's edge.
@@ -3235,10 +3182,9 @@ func (m *Model) renderListRow(session agent.Session, selected bool) string {
 	if descriptionWidth < 8 {
 		return line
 	}
-	description := truncate(
-		listDescription(session, m.group != groupProject),
-		descriptionWidth,
-	)
+	// The project already has its own column, so the description never
+	// repeats it.
+	description := truncate(listDescription(session, false), descriptionWidth)
 	padding := descriptionWidth - lipgloss.Width(description)
 	return line + "  " + mutedStyle.Render(description) +
 		strings.Repeat(" ", padding+1) + mutedStyle.Render(age)
@@ -3301,7 +3247,7 @@ func (m *Model) renderColumn(
 	// column's edge — the rule keeps an empty column visibly a column. A
 	// count of zero dims the name: the gap is the signal, not the label.
 	headerWidth := max(1, width-2)
-	titleColor := column.color
+	titleColor := "#CBD5E1"
 	if len(cards) == 0 {
 		titleColor = "#475569"
 	}
@@ -3357,7 +3303,7 @@ func (m *Model) renderColumn(
 		}
 		renderedCards = append(
 			renderedCards,
-			m.renderCard(cards[i], width-2, selected, column.color),
+			m.renderCard(cards[i], width-2, selected),
 		)
 	}
 	if len(renderedCards) == 0 {
@@ -3375,27 +3321,21 @@ func (m *Model) renderColumn(
 }
 
 // agentColors is each agent's own theme hue: claude in Anthropic's coral,
-// codex in blue, grok in gold. The badge is a label to recognize, not a
-// signal to react to — attention is the amber dot's job — but the label keeps
-// its color even on a settled card: which agent it was is the one thing a
-// card never stops saying.
+// codex in blue, grok in gold. Only the running pulse wears it — a live
+// signal that doubles as saying who is working. Everything merely naming an
+// agent stays in the board's grays.
 var agentColors = map[string]string{
 	"claude": "#D97757",
 	"codex":  "#4E9EFF",
 	"grok":   "#E0A84E",
 }
 
-// agentBadge is the agent's name at the card's top-left, in the agent's own
-// color so two otherwise identical cards tell apart at a glance. Color is the
-// whole badge: neither a filled block nor a drawn outline earns the width and
-// weight it costs on the card's least important line.
+// agentBadge is the agent's name at the card's top-left. Plain text in the
+// board's gray: neither a filled block nor a drawn outline earns the width
+// and weight it costs on the card's least important line.
 func agentBadge(s agent.Session) string {
-	color, ok := agentColors[strings.ToLower(s.Agent)]
-	if !ok {
-		color = "#475569"
-	}
 	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color(color)).
+		Foreground(lipgloss.Color("#94A3B8")).
 		Render(strings.ToLower(s.Agent))
 }
 
@@ -3403,7 +3343,6 @@ func (m *Model) renderCard(
 	s agent.Session,
 	width int,
 	selected bool,
-	color string,
 ) string {
 	inner := max(8, width-cardChrome)
 
@@ -3420,16 +3359,12 @@ func (m *Model) renderCard(
 		projectColor, titleColor = "#64748B", "#94A3B8"
 	}
 
-	// Selection is drawn on the border, and on a settled card it is drawn in
-	// gray: a board of nothing but idle sessions would otherwise always have
-	// one card wearing its group's color, which is the very thing the color
-	// is supposed to mean.
+	// Selection is drawn on the border, in a neutral bright: the border says
+	// where the cursor is, and color stays reserved for the states that need
+	// a person.
 	borderColor := "#334155"
 	if selected {
-		borderColor = color
-		if !live {
-			borderColor = "#94A3B8"
-		}
+		borderColor = "#94A3B8"
 	}
 
 	// The top line is who and where: the agent's badge, the project, and —
@@ -3594,7 +3529,7 @@ func (m *Model) renderComposer() string {
 	}
 	tagStyle := mutedStyle
 	if m.composing {
-		tagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4B5FD"))
+		tagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#CBD5E1"))
 	}
 	// The directory shows only once an @ has pointed the task somewhere
 	// other than the board's own — that pick would otherwise be invisible,
@@ -3607,7 +3542,7 @@ func (m *Model) renderComposer() string {
 	}
 
 	prompt := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#A78BFA")).
+		Foreground(lipgloss.Color("#94A3B8")).
 		Render("❯ ")
 	available := max(1, m.width-2-lipgloss.Width(tag)-2)
 	var line string
@@ -3659,7 +3594,7 @@ func (m *Model) composeMenuRows() []string {
 		nameStyle := mutedStyle
 		if i == sel {
 			marker = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#A78BFA")).
+				Foreground(lipgloss.Color("#F8FAFC")).
 				Render("❯ ")
 			nameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F8FAFC"))
 		}
@@ -3775,14 +3710,6 @@ func (m *Model) renderQuickLook(base string) string {
 	if selected == nil {
 		return base
 	}
-	if m.previewAnimating {
-		progress := float64(time.Since(m.previewOpenedAt)) /
-			float64(previewOpenDuration)
-		if progress < 1 {
-			return m.renderQuickLookOpening(base, *selected, progress)
-		}
-		m.previewAnimating = false
-	}
 	width, height := m.quickLookDimensions()
 	contentWidth := m.quickLookContentWidth()
 	bodyHeight := m.quickLookBodyHeight()
@@ -3883,7 +3810,7 @@ func (m *Model) renderQuickLook(base string) string {
 		Width(width).
 		Height(height).
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#A78BFA")).
+		BorderForeground(lipgloss.Color("#64748B")).
 		Background(lipgloss.Color("#0F172A")).
 		Foreground(lipgloss.Color("#CBD5E1")).
 		Padding(0, padding).
@@ -3926,91 +3853,6 @@ func (m *Model) renderQuickLook(base string) string {
 	return overlayANSI(base, box, x, y, m.width, m.height)
 }
 
-// renderQuickLookOpening draws one frame of the zoom: an empty overlay frame
-// interpolated between the selected card and where the overlay will land, on
-// the macOS Quick Look ease — fast out of the card, settling into place. The
-// content is withheld until the window stops moving; text sliding diagonally
-// across a terminal reads as glitch, not motion.
-func (m *Model) renderQuickLookOpening(
-	base string,
-	selected agent.Session,
-	progress float64,
-) string {
-	boxWidth, boxHeight := m.quickLookDimensions()
-	to := screenRect{
-		x:      max(0, (m.width-boxWidth)/2),
-		y:      max(0, (m.height-boxHeight)/2),
-		width:  boxWidth,
-		height: boxHeight,
-	}
-	from := m.previewAnimFrom
-	if from.width <= 0 || from.height <= 0 {
-		// Nothing recorded to grow out of — a board that has never rendered a
-		// selection — so grow out of the overlay's own centre.
-		from = screenRect{
-			x:      to.x + to.width/2,
-			y:      to.y + to.height/2,
-			width:  4,
-			height: 2,
-		}
-	}
-	frame := zoomFrame(zoomSource(from, m.height), to, progress)
-	title := ""
-	// Two border and two padding columns stand between the frame's width and
-	// its content.
-	if innerWidth := frame.width - 4; innerWidth >= 24 {
-		title = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#F8FAFC")).
-			Render(truncate("Quick Look  "+selected.Title, innerWidth))
-	}
-	// Lip Gloss counts the border inside Width and Height, so the frame's own
-	// dimensions go in whole.
-	box := lipgloss.NewStyle().
-		Width(frame.width).
-		Height(frame.height).
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#A78BFA")).
-		Background(lipgloss.Color("#0F172A")).
-		Padding(0, 1).
-		Render(title)
-	// The borrowed cursor stays hidden until the window has landed.
-	m.paneCursorRow = -1
-	// A click while the window is still growing is judged against where the
-	// window is, not where it will land.
-	m.quickLookRect = frame
-	return overlayANSI(base, box, frame.x, frame.y, m.width, m.height)
-}
-
-// zoomSource makes a drawable first frame out of the selected card's
-// rectangle. A List row is one cell tall, and a bordered frame cannot be:
-// its smallest honest form is three rows hugging the row it grows out of,
-// with the row at the frame's centre rather than under its border.
-func zoomSource(from screenRect, screenHeight int) screenRect {
-	if from.height >= 3 {
-		return from
-	}
-	from.y = max(0, min(from.y-1, screenHeight-3))
-	from.height = 3
-	return from
-}
-
-// zoomFrame is where the zoom's window sits at a point in its run: exactly on
-// the card at 0, exactly on the overlay at 1, and easing out in between.
-func zoomFrame(from, to screenRect, progress float64) screenRect {
-	eased := 1 - math.Pow(1-max(0, min(1, progress)), 3)
-	return screenRect{
-		x:      lerp(from.x, to.x, eased),
-		y:      lerp(from.y, to.y, eased),
-		width:  max(4, lerp(from.width, to.width, eased)),
-		height: max(2, lerp(from.height, to.height, eased)),
-	}
-}
-
-func lerp(from, to int, t float64) int {
-	return from + int(math.Round(float64(to-from)*t))
-}
-
 // renderQuickLookFooter puts the live activity ahead of the key hints, and
 // gives up the hints entirely rather than wrapping a narrow overlay.
 func (m *Model) renderQuickLookFooter(contentWidth int) string {
@@ -4031,14 +3873,12 @@ func (m *Model) renderQuickLookFooter(contentWidth int) string {
 			Foreground(lipgloss.Color("#FBBF24")).
 			Render(truncate(typing, contentWidth))
 	case m.paneView:
-		hints = "↑ past top opens transcript · t session transcript · i type · enter open in tab · esc close"
+		hints = "i type · esc close"
 		if history != "" {
 			hints = history + " · " + hints
 		}
 	case m.previewTranscriptReturnsToPane:
-		hints = "↓ past bottom returns live pane · ↑↓ transcript · t live pane · esc close"
-	case selected != nil && m.canMirrorPane(*selected):
-		hints = "t live pane · ↑↓ scroll · enter open in tab · esc close"
+		hints = "↓ past bottom returns live pane · ↑↓ transcript · esc close"
 	}
 	var note string
 	if selected != nil && !m.paneView && !m.canMirrorPane(*selected) &&
@@ -4259,7 +4099,7 @@ var roomyPaneFrame = paneWindowFrame{
 // a border, no padding, and the two columns it costs reported in the subtitle.
 func (m *Model) paneFrame() paneWindowFrame {
 	roomy := roomyPaneFrame
-	if !m.paneView {
+	if !m.paneAnchored() {
 		return roomy
 	}
 	if m.paneScreenWidth+roomy.chrome+2*roomy.margin <= m.width {
@@ -4279,8 +4119,16 @@ func (m *Model) paneFloats() bool {
 	return m.paneView && m.paneFrame().floats()
 }
 
+// paneAnchored reports whether the overlay's size belongs to the pane: either
+// the mirror itself is showing, or the transcript is continuing it after a
+// scroll past the top. The continuation keeps the pane window's exact frame —
+// a window that changes size mid-scroll reads as a flicker, not a handoff.
+func (m *Model) paneAnchored() bool {
+	return m.paneView || m.previewTranscriptReturnsToPane
+}
+
 func (m *Model) quickLookDimensions() (int, int) {
-	if m.paneView {
+	if m.paneAnchored() {
 		frame := m.paneFrame()
 		if !frame.floats() {
 			return m.width, m.height
@@ -4441,10 +4289,9 @@ func (m *Model) buildPreviewLines(
 	lines := make([]string, 0)
 	for _, message := range m.previewMessages {
 		label := strings.ToUpper(session.Agent)
-		labelColor := "#60A5FA"
+		labelColor := "#94A3B8"
 		if message.Role == agent.RoleUser {
 			label = "YOU"
-			labelColor = "#C4B5FD"
 		}
 		if !message.Timestamp.IsZero() {
 			label += " · " + message.Timestamp.Local().Format("15:04")
@@ -4502,7 +4349,7 @@ func (m *Model) renderDetail() string {
 	box := lipgloss.NewStyle().
 		Width(width).
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#A78BFA")).
+		BorderForeground(lipgloss.Color("#64748B")).
 		Background(lipgloss.Color("#0F172A")).
 		Foreground(lipgloss.Color("#CBD5E1")).
 		Padding(1, 2).
