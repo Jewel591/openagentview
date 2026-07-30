@@ -14,6 +14,7 @@ import (
 	"github.com/Jewel591/openagentview/internal/codex"
 	"github.com/Jewel591/openagentview/internal/dismiss"
 	"github.com/Jewel591/openagentview/internal/grok"
+	"github.com/Jewel591/openagentview/internal/prefs"
 	"github.com/Jewel591/openagentview/internal/tmux"
 	"github.com/Jewel591/openagentview/internal/ui"
 )
@@ -96,8 +97,13 @@ func main() {
 	// sees sessions in tmux panes, which proves nothing else gone.
 	dismissals, _ := dismiss.Open()
 
+	// The board's arrangement — grouping, layout, agent filter — comes back
+	// the way it was left. A store that cannot be opened just means default
+	// arrangement and no saving this run.
+	preferences, _ := prefs.Open()
+
 	program := tea.NewProgram(
-		ui.New(panes, panes, panes, launchers, dismissals, !tmuxOnly),
+		ui.New(panes, panes, panes, launchers, dismissals, preferences, !tmuxOnly),
 	)
 	if _, err := program.Run(); err != nil {
 		fatal(err)

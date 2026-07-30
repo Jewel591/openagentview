@@ -16,6 +16,7 @@ import (
 
 	"github.com/Jewel591/openagentview/internal/agent"
 	"github.com/Jewel591/openagentview/internal/dismiss"
+	"github.com/Jewel591/openagentview/internal/prefs"
 	"github.com/Jewel591/openagentview/internal/tmux"
 )
 
@@ -159,12 +160,6 @@ func loadMsg(t *testing.T, cmd tea.Cmd) tea.Msg {
 	return nil
 }
 
-// settleQuickLook fast-forwards past the opening zoom, so assertions see the
-// settled overlay rather than an animation frame.
-func settleQuickLook(m *Model) {
-	m.previewOpenedAt = time.Now().Add(-2 * previewOpenDuration)
-}
-
 // A session running in a pane has a screen, and the screen shows what the
 // rollout log cannot: the prompt the agent is currently blocked on.
 func TestQuickLookMirrorsTheTmuxPaneOfALiveSession(t *testing.T) {
@@ -175,13 +170,12 @@ func TestQuickLookMirrorsTheTmuxPaneOfALiveSession(t *testing.T) {
 	if !m.paneView {
 		t.Fatal("Quick Look on a tmux session did not mirror its pane")
 	}
-	// Mirroring is only half the point: the overlay opens ready to answer the
-	// agent rather than behind a mode.
-	if !m.paneInput {
-		t.Fatal("the mirrored pane did not open ready to type into")
+	// The overlay opens browsing, so the space that opened it can close it
+	// again; answering the agent is behind i.
+	if m.paneInput {
+		t.Fatal("the mirrored pane opened typing instead of browsing")
 	}
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	settleQuickLook(m)
 
 	if !strings.Contains(m.View().Content, "approve shell command?") {
 		t.Fatal("the overlay did not show the pane's screen")
@@ -220,7 +214,6 @@ func TestMirrorScrollReachesTheScrollback(t *testing.T) {
 	m := tmuxModel(panes)
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	settleQuickLook(m)
 	if panes.captured[0] != 0 {
 		t.Fatalf("the opening capture asked for %d rows of history, want none",
 			panes.captured[0])
@@ -294,6 +287,60 @@ func TestMirrorScrollReachesTheScrollback(t *testing.T) {
 	}
 }
 
+// The automatic hop from the pane into the transcript keeps the pane
+// window's exact size in both directions: a window that changes shape
+// mid-scroll reads as a flicker, not a handoff.
+func TestTranscriptContinuationKeepsThePaneWindowSize(t *testing.T) {
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = "screen-" + strconv.Itoa(i)
+	}
+	messages := make([]agent.TranscriptMessage, 40)
+	for i := range messages {
+		messages[i] = agent.TranscriptMessage{
+			Role: agent.RoleAgent,
+			Text: "transcript-" + strconv.Itoa(i),
+		}
+	}
+	panes := &fakePanes{lines: lines, alternate: true, width: 80}
+	m := tmuxModel(panes)
+	m.adapter = &previewAdapter{messages: messages}
+	load := m.openQuickLook()
+	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
+	paneWidth, paneHeight := m.quickLookDimensions()
+
+	m.previewScrollBack = m.previewMaxScrollBack()
+	_, cmd := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if m.paneView {
+		t.Fatal("scrolling past the pane boundary did not enter the transcript")
+	}
+	if w, h := m.quickLookDimensions(); w != paneWidth || h != paneHeight {
+		t.Fatalf("continuation resized the window to %dx%d, want %dx%d",
+			w, h, paneWidth, paneHeight)
+	}
+	// The size holds after the transcript actually arrives, not just in the
+	// loading gap.
+	_, _ = m.Update(cmd().(previewLoadedMsg))
+	if w, h := m.quickLookDimensions(); w != paneWidth || h != paneHeight {
+		t.Fatalf("the loaded transcript resized the window to %dx%d, want %dx%d",
+			w, h, paneWidth, paneHeight)
+	}
+
+	// The way back is the same window too.
+	m.previewScrollBack = 0
+	_, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if !m.paneView {
+		t.Fatal("scrolling through the transcript bottom did not return live")
+	}
+	if back, ok := cmd().(paneLoadedMsg); ok {
+		_, _ = m.Update(back)
+	}
+	if w, h := m.quickLookDimensions(); w != paneWidth || h != paneHeight {
+		t.Fatalf("returning live resized the window to %dx%d, want %dx%d",
+			w, h, paneWidth, paneHeight)
+	}
+}
+
 // Alternate-screen TUIs give tmux only their current frame. Reaching the top
 // continues into the agent-owned transcript instead of presenting that tmux
 // boundary as the end of the conversation.
@@ -309,13 +356,20 @@ func TestMirrorScrollContinuesPastAnAlternateScreenIntoTranscript(t *testing.T) 
 			Text: "transcript-" + strconv.Itoa(i),
 		}
 	}
-	panes := &fakePanes{lines: lines, alternate: true}
+	// A realistic pane width: the continuation window keeps the pane's frame,
+	// and a zero-width pane would leave no room for the subtitle under test.
+	panes := &fakePanes{lines: lines, alternate: true, width: 100}
 	m := tmuxModel(panes)
 	adapter := &previewAdapter{messages: messages}
 	m.adapter = adapter
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	settleQuickLook(m)
+	// Typing when the pane overflows into the transcript, so the return trip
+	// has a typing state worth restoring.
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
+	if !m.paneInput {
+		t.Fatal("i did not start typing into the pane")
+	}
 
 	maxScroll := m.previewMaxScrollBack()
 	if maxScroll <= 0 {
@@ -429,7 +483,6 @@ func TestTranscriptLoadsOlderMessagesOnlyWhenItsTopIsCrossed(t *testing.T) {
 	if m.previewMessageLimit != previewMessagePage*2 {
 		t.Fatalf("in-flight expansion grew again to %d", m.previewMessageLimit)
 	}
-	settleQuickLook(m)
 	if !strings.Contains(m.View().Content, "loading older history") {
 		t.Fatal("an in-flight transcript expansion had no visible feedback")
 	}
@@ -500,7 +553,6 @@ func TestMirrorCanReachHistoryPastTwoThousandLines(t *testing.T) {
 	m := tmuxModel(panes)
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	m.paneInput = false
 
 	cmd := press(t, m, tea.KeyPressMsg{Code: 'g', Text: "g"})
 	if cmd == nil {
@@ -549,11 +601,11 @@ func TestViewOnlyNoteOutlivesTheKeyHints(t *testing.T) {
 }
 
 // A live session mirrored from its pane can be typed into, so its transcript
-// side must not claim to be view-only.
+// continuation must not claim to be view-only.
 func TestMirrorableTranscriptCarriesNoViewOnlyNote(t *testing.T) {
 	m := tmuxModel(&fakePanes{})
 	m.openQuickLook()
-	m.togglePaneView()
+	m.continuePaneIntoTranscript(1)
 	m.previewLoading = false
 	m.previewStatus = agent.StatusRunning
 
@@ -561,8 +613,8 @@ func TestMirrorableTranscriptCarriesNoViewOnlyNote(t *testing.T) {
 	if strings.Contains(footer, "view only") {
 		t.Fatalf("a mirrorable session was marked view-only: %q", footer)
 	}
-	if !strings.Contains(footer, "t live pane") {
-		t.Fatalf("the transcript of a mirrorable session should offer the pane: %q", footer)
+	if !strings.Contains(footer, "returns live pane") {
+		t.Fatalf("the transcript continuation should offer the way back: %q", footer)
 	}
 }
 
@@ -571,6 +623,7 @@ func TestTypingIntoAPaneSendsTextAndReturnSeparately(t *testing.T) {
 	m := tmuxModel(panes)
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
 
 	for _, key := range []tea.KeyPressMsg{
 		{Code: 'y', Text: "y"},
@@ -591,119 +644,146 @@ func TestTypingIntoAPaneSendsTextAndReturnSeparately(t *testing.T) {
 	}
 }
 
-// Esc belongs to the agent while typing — codex binds it — so leaving typing
-// is a keystroke no agent TUI uses.
-func TestCtrlBracketLeavesTypingWithoutClosingQuickLook(t *testing.T) {
+// The mirror follows the macOS Quick Look rhythm: space opens browsing and
+// space closes again. Typing sits behind i, where every key — space and enter
+// included — belongs to the agent, and esc steps back out to browsing.
+func TestSpaceTogglesTheMirrorAndTypingSitsBehindI(t *testing.T) {
 	panes := &fakePanes{lines: []string{"waiting"}}
 	m := tmuxModel(panes)
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-
-	// Esc goes to the agent, not to the overlay.
-	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if cmd == nil {
-		t.Fatal("esc was swallowed instead of reaching the agent")
-	}
-	cmd()
-	if !m.paneInput || !m.previewOpen {
-		t.Fatal("esc stopped typing instead of reaching the agent")
-	}
-	if len(panes.sent) != 1 || !strings.HasSuffix(panes.sent[0], "key:Escape") {
-		t.Fatalf("sent %v, want an Escape for the agent", panes.sent)
-	}
-
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
-	if m.paneInput {
-		t.Fatal("ctrl+] did not stop typing")
-	}
-	if !m.previewOpen {
-		t.Fatal("ctrl+] closed Quick Look instead of stopping typing")
-	}
 
 	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
 	if !m.paneInput {
-		t.Fatal("i did not start typing again")
+		t.Fatal("i did not start typing into the pane")
 	}
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
 
-	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m.previewOpen {
-		t.Fatal("esc did not close Quick Look once typing had stopped")
+	// While typing, spaces are text for the agent, not the close gesture.
+	for _, key := range []tea.KeyPressMsg{
+		{Code: ' ', Text: " "},
+		{Code: 'a', Text: "a"},
+		{Code: ' ', Text: " "},
+	} {
+		cmd := press(t, m, key)
+		if cmd == nil {
+			t.Fatalf("%q did not reach the pane", key.Text)
+		}
+		cmd()
 	}
-}
+	if !m.previewOpen || !m.paneInput {
+		t.Fatal("typed spaces closed Quick Look instead of reaching the agent")
+	}
+	if len(panes.sent) != 3 || !strings.HasSuffix(panes.sent[2], "text: ") {
+		t.Fatalf("sent %v, want three typed characters", panes.sent)
+	}
 
-// Space opens and closes Quick Look everywhere else on the board, and keeps
-// doing so inside a mirrored pane. The space bar is the price: a typed space
-// is ctrl+space.
-func TestSpaceClosesTheMirrorAndCtrlSpaceTypesOne(t *testing.T) {
-	panes := &fakePanes{lines: []string{"waiting"}}
-	m := tmuxModel(panes)
-	load := m.openQuickLook()
-	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-
-	cmd := press(t, m, tea.KeyPressMsg{Code: ' ', Mod: tea.ModCtrl})
+	// The board's own shortcuts yield too: ctrl+s is the group toggle
+	// everywhere else, but typing hands it to the agent like any other key.
+	group := m.group
+	cmd := press(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	if cmd == nil {
-		t.Fatal("ctrl+space did not reach the pane")
+		t.Fatal("ctrl+s did not reach the pane while typing")
 	}
 	cmd()
-	if !m.previewOpen {
-		t.Fatal("ctrl+space closed Quick Look instead of typing a space")
+	if !m.previewOpen || !m.paneInput || m.group != group {
+		t.Fatal("ctrl+s closed Quick Look or toggled the grouping while typing")
 	}
-	if len(panes.sent) != 1 || !strings.HasSuffix(panes.sent[0], "text: ") {
-		t.Fatalf("sent %v, want a literal space", panes.sent)
+	if len(panes.sent) != 4 || !strings.HasSuffix(panes.sent[3], "key:C-s") {
+		t.Fatalf("sent %v, want a trailing C-s", panes.sent)
 	}
 
-	press(t, m, tea.KeyPressMsg{Code: ' ', Text: " "})
-	if m.previewOpen || m.paneInput {
-		t.Fatal("space did not close the mirror while typing")
+	// Esc leaves typing without closing the window or reaching the agent.
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.paneInput {
+		t.Fatal("esc did not stop typing")
 	}
-	if len(panes.sent) != 1 {
+	if !m.previewOpen {
+		t.Fatal("esc closed Quick Look instead of stopping typing")
+	}
+	if len(panes.sent) != 4 {
+		t.Fatalf("sent %v, want the esc kept from the agent", panes.sent)
+	}
+
+	// ctrl+] stays as an alias for the hands already trained on it.
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
+	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
+	if m.paneInput || !m.previewOpen {
+		t.Fatal("ctrl+] did not step back out to browsing")
+	}
+
+	// Browsing again, the space that opened the window closes it.
+	press(t, m, tea.KeyPressMsg{Code: ' ', Text: " "})
+	if m.previewOpen {
+		t.Fatal("space did not close Quick Look from browse mode")
+	}
+	if len(panes.sent) != 4 {
 		t.Fatalf("sent %v, want the closing space kept out of the pane", panes.sent)
 	}
 }
 
-func TestToggleSwapsBetweenPaneAndTranscript(t *testing.T) {
-	m := tmuxModel(&fakePanes{lines: []string{"live screen"}})
-	load := m.openQuickLook()
-	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	// While typing, t belongs to the agent; ctrl+] hands the board's keys back.
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
+// A title with no space to break at — a CJK title, a path, an identifier —
+// still fills both rows, split at the cell edge instead of a word boundary.
+func TestWrapTitleRowsBreaksUnspacedTitlesAcrossBothRows(t *testing.T) {
+	rows := wrapTitleRows("优化账单页面切换动画和分类排序样式与交互细节", 12)
+	if rows[0] == "" || rows[1] == "" {
+		t.Fatalf("rows = %q, want both rows used", rows)
+	}
+	if lipgloss.Width(rows[0]) > 12 || lipgloss.Width(rows[1]) > 12 {
+		t.Fatalf("rows = %q, want both within the width", rows)
+	}
+	if strings.Contains(rows[0], "…") {
+		t.Fatalf("first row %q truncated instead of carrying into the second", rows[0])
+	}
 
-	cmd := press(t, m, tea.KeyPressMsg{Code: 't', Text: "t"})
-	if m.paneView {
-		t.Fatal("t did not switch to the transcript")
-	}
-	if _, ok := cmd().(previewLoadedMsg); !ok {
-		t.Fatal("switching to the transcript did not load one")
+	// Spaced titles keep breaking at word boundaries.
+	rows = wrapTitleRows("fix the parser regression", 12)
+	if rows[0] != "fix the" || rows[1] != "parser…" && !strings.HasPrefix(rows[1], "parser") {
+		t.Fatalf("rows = %q, want a word-boundary break", rows)
 	}
 
-	cmd = press(t, m, tea.KeyPressMsg{Code: 't', Text: "t"})
-	if !m.paneView {
-		t.Fatal("t did not switch back to the pane")
-	}
-	if _, ok := cmd().(paneLoadedMsg); !ok {
-		t.Fatal("switching back to the pane did not capture it")
+	// Short titles leave the second row blank.
+	rows = wrapTitleRows("short", 12)
+	if rows[0] != "short" || rows[1] != "" {
+		t.Fatalf("rows = %q, want a one-row title", rows)
 	}
 }
 
-func TestManualTranscriptStaysOpenAtItsBottom(t *testing.T) {
+// A click inside the mirror is the mouse's way of pressing i; a click outside
+// stays the mouse's way of putting the window down.
+func TestClickOnTheMirrorStartsTyping(t *testing.T) {
+	m := tmuxModel(&fakePanes{lines: []string{"waiting"}, width: 80})
+	load := m.openQuickLook()
+	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
+	// A render records where the window sits, which is what a click resolves
+	// against.
+	_ = m.View()
+
+	x := m.quickLookRect.x + m.quickLookRect.width/2
+	y := m.quickLookRect.y + m.quickLookRect.height/2
+	_, _ = m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if !m.paneInput {
+		t.Fatal("a click on the mirror did not start typing")
+	}
+	if !m.previewOpen {
+		t.Fatal("a click on the mirror closed it")
+	}
+
+	_, _ = m.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	if m.previewOpen || m.paneInput {
+		t.Fatal("a click outside did not put the window down")
+	}
+}
+
+// The transcript is reached by scrolling, not by a mode key: t stopped being
+// a view toggle when the scroll continuation covered it.
+func TestTIsNotAViewToggle(t *testing.T) {
 	m := tmuxModel(&fakePanes{lines: []string{"live screen"}})
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
 
-	cmd := press(t, m, tea.KeyPressMsg{Code: 't', Text: "t"})
-	_, _ = m.Update(cmd().(previewLoadedMsg))
-	if m.previewTranscriptReturnsToPane {
-		t.Fatal("an explicit transcript toggle was marked as an automatic continuation")
-	}
-	m.previewScrollBack = 0
-	_, cmd = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
-	if cmd != nil {
-		t.Fatal("the bottom of a manually selected transcript loaded the pane")
-	}
-	if m.paneView {
-		t.Fatal("the bottom of a manually selected transcript returned live")
+	press(t, m, tea.KeyPressMsg{Code: 't', Text: "t"})
+	if !m.paneView {
+		t.Fatal("t switched views instead of doing nothing")
 	}
 }
 
@@ -724,8 +804,14 @@ func TestMirrorShowsTheAgentsCursorWhileTyping(t *testing.T) {
 	m.width, m.height = 36, 20
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	settleQuickLook(m)
 
+	// Browsing is not typing: the cursor would claim keys go somewhere they do
+	// not.
+	if m.View().Cursor != nil {
+		t.Fatal("the cursor was on before typing started")
+	}
+
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
 	cursor := m.View().Cursor
 	if cursor == nil {
 		t.Fatal("the mirror showed no cursor while typing into the agent")
@@ -734,9 +820,7 @@ func TestMirrorShowsTheAgentsCursorWhileTyping(t *testing.T) {
 		t.Fatalf("cursor = %d,%d, want 2,%d", cursor.X, cursor.Y, quickLookBodyRow)
 	}
 
-	// Browsing is not typing: the cursor would claim keys go somewhere they do
-	// not.
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
+	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.View().Cursor != nil {
 		t.Fatal("the cursor stayed on after typing stopped")
 	}
@@ -755,7 +839,7 @@ func TestNarrowPaneIsMirroredInAWindow(t *testing.T) {
 	m := tmuxModel(panes)
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	settleQuickLook(m)
+	press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
 
 	if !m.paneFloats() {
 		t.Fatal("an 80-column pane filled a 120-column terminal")
@@ -899,7 +983,6 @@ func TestPaneLinesAreCroppedWithinTheOverlay(t *testing.T) {
 	m := tmuxModel(&fakePanes{lines: []string{wide}})
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	settleQuickLook(m)
 
 	for _, line := range m.paneBodyLines(60) {
 		if width := lipgloss.Width(line); width > 60 {
@@ -921,7 +1004,6 @@ func TestPaneReadFailureIsShownInsteadOfAnEmptyOverlay(t *testing.T) {
 	m := tmuxModel(&fakePanes{err: errors.New("can't find pane: %7")})
 	load := m.openQuickLook()
 	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-	settleQuickLook(m)
 
 	view := m.View().Content
 	if !strings.Contains(view, "Unable to read the pane") ||
@@ -1168,6 +1250,39 @@ func TestListModeRowsFitTheTerminal(t *testing.T) {
 	}
 }
 
+// Grouped by status no heading names the project, so each row carries its
+// own project column; grouped by project the heading already says it.
+func TestStatusGroupedListRowsNameTheirProject(t *testing.T) {
+	m := listModel()
+	m.sessions[0].CWD = "/projects/mono"
+	m.sessions[0].Title = "Fix the parser"
+
+	board := ansi.Strip(m.renderBoard())
+	statusRow := ""
+	for _, line := range strings.Split(board, "\n") {
+		if strings.Contains(line, "Fix the parser") {
+			statusRow = line
+		}
+	}
+	if statusRow == "" {
+		t.Fatal("the session's row did not render")
+	}
+	if !strings.Contains(statusRow, "mono") {
+		t.Fatalf("status-grouped row does not name its project: %q", statusRow)
+	}
+	if strings.Index(statusRow, "mono") > strings.Index(statusRow, "Fix the parser") {
+		t.Fatalf("the project column should sit before the title: %q", statusRow)
+	}
+
+	m.group = groupProject
+	board = ansi.Strip(m.renderBoard())
+	for _, line := range strings.Split(board, "\n") {
+		if strings.Contains(line, "Fix the parser") && strings.Contains(line, "mono") {
+			t.Fatalf("project-grouped row repeats the heading's project: %q", line)
+		}
+	}
+}
+
 // A session whose title is its own first prompt has nothing to say twice, so
 // the description falls back to where the session is.
 func TestListDescriptionFallsBackToLocation(t *testing.T) {
@@ -1188,6 +1303,106 @@ func TestListDescriptionFallsBackToLocation(t *testing.T) {
 	session.Preview = "Fix the parser, then add a regression test"
 	if got := listDescription(session, true); got != session.Preview {
 		t.Fatalf("description = %q, want the prompt", got)
+	}
+}
+
+// A board with more projects than the width can hold shows fewer columns at
+// a readable width instead of squeezing them all in, and slides the window
+// to keep the selected column on screen.
+func TestKanbanKeepsColumnsReadableAndScrollsTheOverflow(t *testing.T) {
+	now := time.Now()
+	m := &Model{group: groupProject, width: 120, height: 40}
+	for i := 0; i < 9; i++ {
+		name := "project-" + string(rune('a'+i))
+		// Distinct ages keep the project columns in a..i order: columns sort
+		// by recency, and identical timestamps would leave the order to the
+		// map's whim.
+		at := now.Add(-time.Duration(i) * time.Minute)
+		m.sessions = append(m.sessions, agent.Session{
+			ID:        name,
+			Agent:     "codex",
+			Title:     "task in " + name,
+			CWD:       "/projects/" + name,
+			RecencyAt: at,
+			UpdatedAt: at,
+		})
+	}
+	m.clampSelection()
+
+	countVisible := func() int {
+		board := ansi.Strip(m.renderBoard())
+		visible := 0
+		for i := 0; i < 9; i++ {
+			if strings.Contains(board, "project-"+string(rune('a'+i))+" ") {
+				visible++
+			}
+		}
+		return visible
+	}
+
+	visible := countVisible()
+	if visible >= 9 {
+		t.Fatal("a 120-cell board squeezed all nine columns in")
+	}
+	if visible < 2 {
+		t.Fatalf("visible columns = %d, want at least two", visible)
+	}
+
+	// The last column is off-screen until the selection travels there.
+	board := ansi.Strip(m.renderBoard())
+	if strings.Contains(board, "project-i") {
+		t.Fatal("the last column was visible before the selection reached it")
+	}
+	m.column = 8
+	m.clampSelection()
+	if !strings.Contains(ansi.Strip(m.renderBoard()), "project-i") {
+		t.Fatal("the window did not slide to keep the selected column visible")
+	}
+}
+
+// The board comes back arranged the way it was left: grouping, layout and
+// the agent filter all survive one model being torn down and another built
+// on the same state file.
+func TestBoardArrangementSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefs.json")
+	store, err := prefs.OpenAt(path)
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+	m := tmuxModel(&fakePanes{})
+	m.preferences = store
+	m.toggleGroup()
+	m.toggleLayout()
+	m.toggleAgentFilter("codex")
+
+	reopened, err := prefs.OpenAt(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	next := tmuxModel(&fakePanes{})
+	next.preferences = reopened
+	next.applyPrefs()
+	if next.group != groupProject {
+		t.Fatal("the grouping did not survive a restart")
+	}
+	if next.layout != layoutList {
+		t.Fatal("the layout did not survive a restart")
+	}
+	if len(next.agentFilter) != 1 || !next.agentFilter["codex"] {
+		t.Fatalf("agentFilter = %v, want codex alone", next.agentFilter)
+	}
+
+	// Toggling everything back leaves the file at the defaults again.
+	next.toggleGroup()
+	next.toggleLayout()
+	next.toggleAgentFilter("codex")
+	final, err := prefs.OpenAt(path)
+	if err != nil {
+		t.Fatalf("final reopen: %v", err)
+	}
+	saved := final.Load()
+	if saved.Group != "status" || saved.Layout != "kanban" || len(saved.Agents) != 0 {
+		t.Fatalf("saved = %+v, want the defaults", saved)
 	}
 }
 
@@ -1809,96 +2024,6 @@ func TestWheelIsIgnoredOnTheBoard(t *testing.T) {
 	}
 }
 
-// Quick Look grows out of the card it was opened on, and settles once the
-// opening beat has passed.
-func TestQuickLookZoomsOutOfTheSelectedCard(t *testing.T) {
-	now := time.Now()
-	m := &Model{
-		group:  groupStatus,
-		width:  120,
-		height: 40,
-		sessions: []agent.Session{{
-			ID:            "s",
-			Title:         "Session under review",
-			RuntimeStatus: agent.StatusNeedsYou,
-			RecencyAt:     now,
-			UpdatedAt:     now,
-			CWD:           "/projects/mono",
-		}},
-	}
-
-	press(t, m, tea.KeyPressMsg{Code: ' ', Text: " "})
-
-	if !m.previewOpen || !m.previewAnimating {
-		t.Fatalf("space opened previewOpen=%v animating=%v, want both",
-			m.previewOpen, m.previewAnimating)
-	}
-	if m.previewAnimFrom.width <= 0 || m.previewAnimFrom.height <= 0 {
-		t.Fatalf("zoom starts from %+v, want the selected card's rectangle",
-			m.previewAnimFrom)
-	}
-
-	// Past the opening beat the overlay must settle into the ordinary render.
-	m.previewOpenedAt = time.Now().Add(-2 * previewOpenDuration)
-	_ = m.renderQuickLook(m.previewBase)
-	if m.previewAnimating {
-		t.Fatal("the zoom kept running after its duration had passed")
-	}
-}
-
-func TestZoomFrameEndpoints(t *testing.T) {
-	from := screenRect{x: 3, y: 5, width: 20, height: 5}
-	to := screenRect{x: 10, y: 2, width: 100, height: 30}
-	if got := zoomFrame(from, to, 0); got != from {
-		t.Fatalf("zoomFrame(0) = %+v, want the card %+v", got, from)
-	}
-	if got := zoomFrame(from, to, 1); got != to {
-		t.Fatalf("zoomFrame(1) = %+v, want the overlay %+v", got, to)
-	}
-}
-
-// The zoom's first frame must sit exactly on the selected card — corners and
-// all — or the effect reads as a box appearing near the card, not out of it.
-func TestOpeningFrameSitsExactlyOnTheCard(t *testing.T) {
-	m := &Model{width: 120, height: 40, previewOpen: true, previewAnimating: true}
-	card := screenRect{x: 25, y: 7, width: 22, height: 5}
-	m.previewAnimFrom = card
-	base := strings.TrimSuffix(
-		strings.Repeat(strings.Repeat(".", 120)+"\n", 40), "\n",
-	)
-
-	frame := m.renderQuickLookOpening(base, agent.Session{Title: "Session"}, 0)
-
-	lines := strings.Split(frame, "\n")
-	top := []rune(ansi.Strip(lines[card.y]))
-	bottom := []rune(ansi.Strip(lines[card.y+card.height-1]))
-	if top[card.x] != '╭' || top[card.x+card.width-1] != '╮' {
-		t.Fatalf("top border corners = %q %q at the card's edges, want ╭ ╮",
-			top[card.x], top[card.x+card.width-1])
-	}
-	if bottom[card.x] != '╰' || bottom[card.x+card.width-1] != '╯' {
-		t.Fatalf("bottom border corners = %q %q, want ╰ ╯",
-			bottom[card.x], bottom[card.x+card.width-1])
-	}
-}
-
-// Toggling pane/transcript mid-zoom bumps the content generation; the zoom
-// rides its own generation and must keep animating rather than freeze.
-func TestZoomSurvivesAContentGenerationBump(t *testing.T) {
-	m := tmuxModel(&fakePanes{lines: []string{"waiting"}})
-	load := m.openQuickLook()
-	_, _ = m.Update(loadMsg(t, load).(paneLoadedMsg))
-
-	press(t, m, tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl})
-	press(t, m, tea.KeyPressMsg{Code: 't', Text: "t"})
-
-	m.previewOpenedAt = time.Now()
-	_, tick := m.Update(previewAnimMsg{generation: m.previewAnimGeneration})
-	if tick == nil {
-		t.Fatal("the zoom's next frame was dropped after the content generation moved on")
-	}
-}
-
 // Everything below the header takes its rows from boardTopRow, so the header
 // must stay one content line at any width instead of wrapping.
 func TestHeaderNeverWraps(t *testing.T) {
@@ -1913,38 +2038,6 @@ func TestHeaderNeverWraps(t *testing.T) {
 				t.Fatalf("width %d header rendered a %d-cell line", width, got)
 			}
 		}
-	}
-}
-
-// A List row is one cell tall — too thin for a bordered frame — so the zoom's
-// first frame is the smallest honest box: three rows with the row at centre.
-func TestOpeningFrameHugsAListRow(t *testing.T) {
-	m := listModel()
-	_ = m.renderBoard()
-	if m.selectedRect.height != 1 {
-		t.Fatalf("list selectedRect = %+v, want a one-row rectangle", m.selectedRect)
-	}
-
-	row := m.selectedRect
-	m.previewOpen = true
-	m.previewAnimating = true
-	m.previewAnimFrom = row
-	base := strings.TrimSuffix(
-		strings.Repeat(strings.Repeat(".", m.width)+"\n", m.height), "\n",
-	)
-
-	frame := m.renderQuickLookOpening(base, agent.Session{Title: "Session"}, 0)
-
-	lines := strings.Split(frame, "\n")
-	top := []rune(ansi.Strip(lines[row.y-1]))
-	bottom := []rune(ansi.Strip(lines[row.y+1]))
-	if top[row.x] != '╭' || top[row.x+row.width-1] != '╮' {
-		t.Fatalf("top border corners = %q %q above the row, want ╭ ╮",
-			top[row.x], top[row.x+row.width-1])
-	}
-	if bottom[row.x] != '╰' || bottom[row.x+row.width-1] != '╯' {
-		t.Fatalf("bottom border corners = %q %q below the row, want ╰ ╯",
-			bottom[row.x], bottom[row.x+row.width-1])
 	}
 }
 
@@ -2292,7 +2385,6 @@ func TestHeaderTabsSwitchGroupAndLayoutOnClick(t *testing.T) {
 func TestClickOutsideQuickLookClosesIt(t *testing.T) {
 	m := clickBoardModel()
 	press(t, m, tea.KeyPressMsg{Code: ' ', Text: " "})
-	settleQuickLook(m)
 	m.render()
 
 	inside := m.quickLookRect

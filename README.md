@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](go.mod)
 
+![OpenAgentView — the board with Quick Look mirroring a live Claude Code session](https://2gfgijuezkgp4uav.public.blob.vercel-storage.com/openagentview/readme-hero.png)
+
 **OpenAgentView** (`openagentview`) is like Claude Code's agent view, but for
 every coding agent — and handier. It is a local-first terminal control plane
 that discovers the saved sessions of every agent CLI on your machine and
@@ -129,32 +131,30 @@ shows as `@name` next to the agent tag until the task starts, and survives
 the draft being put down; the board's own directory goes unlabelled. The composer
 appears only when tmux and at least one agent CLI are installed.
 
-Quick Look on a session running in a tmux pane opens typing into that agent.
-The pane is mirrored at its own width, in a window over the board. Every key
-goes to the agent, `Esc` and `Enter` included:
-
-| Key | Action |
-| --- | --- |
-| `Ctrl+Space` | Type a space — the space bar closes Quick Look instead |
-| `Ctrl+C` | Interrupt the agent in the pane |
-| `Space` | Close Quick Look |
-| `Ctrl+]` | Stop typing and hand the board's keys back |
-
-Once `Ctrl+]` has stopped typing:
+Quick Look on a session running in a tmux pane mirrors that pane at its own
+width, in a window over the board. It opens browsing, the way the macOS
+original does — the same `Space` that opened it closes it again:
 
 | Key | Action |
 | --- | --- |
 | `↑` / `↓`, `PgUp` / `PgDn`, `g` / `G` | Scroll the pane or transcript |
-| `t` | Switch between the live pane and the stored transcript |
-| `i` | Start typing again |
+| `i` (or a click on the window) | Start typing into the agent |
 | `Enter` | Open the session in a new terminal tab |
 | `Esc` / `Space` | Close Quick Look |
 
+While typing, every key goes to the agent — `Space` and `Enter` included:
+
+| Key | Action |
+| --- | --- |
+| `Esc` | Stop typing and hand the board's keys back |
+| `Ctrl+C` | Interrupt the agent in the pane |
+
 Full-screen agent TUIs use the terminal's alternate screen, which tmux keeps
 only as a current frame rather than scrollback. Quick Look labels those mirrors
-`current screen only`; switch to the session transcript to read earlier
-conversation content. Ordinary tmux history is loaded in growing pages as it
-is needed, up to the pane's actual history limit.
+`current screen only`; scrolling past the top continues seamlessly into the
+session transcript for earlier conversation content, and scrolling back down
+past its bottom returns to the live pane. Ordinary tmux history is loaded in
+growing pages as it is needed, up to the pane's actual history limit.
 
 Opening a tab drives the terminal's own scripting interface — AppleScript
 for Ghostty, iTerm2 and Terminal.app (macOS asks once for automation
