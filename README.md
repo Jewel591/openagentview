@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](go.mod)
 
+![OpenAgentView — the board with Quick Look mirroring a live Claude Code session](https://2gfgijuezkgp4uav.public.blob.vercel-storage.com/openagentview/readme-hero.png)
+
 **OpenAgentView** (`openagentview`) is like Claude Code's agent view, but for
 every coding agent — and handier. It is a local-first terminal control plane
 that discovers the saved sessions of every agent CLI on your machine and

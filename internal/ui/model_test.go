@@ -677,6 +677,21 @@ func TestSpaceTogglesTheMirrorAndTypingSitsBehindI(t *testing.T) {
 		t.Fatalf("sent %v, want three typed characters", panes.sent)
 	}
 
+	// The board's own shortcuts yield too: ctrl+s is the group toggle
+	// everywhere else, but typing hands it to the agent like any other key.
+	group := m.group
+	cmd := press(t, m, tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("ctrl+s did not reach the pane while typing")
+	}
+	cmd()
+	if !m.previewOpen || !m.paneInput || m.group != group {
+		t.Fatal("ctrl+s closed Quick Look or toggled the grouping while typing")
+	}
+	if len(panes.sent) != 4 || !strings.HasSuffix(panes.sent[3], "key:C-s") {
+		t.Fatalf("sent %v, want a trailing C-s", panes.sent)
+	}
+
 	// Esc leaves typing without closing the window or reaching the agent.
 	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.paneInput {
@@ -685,7 +700,7 @@ func TestSpaceTogglesTheMirrorAndTypingSitsBehindI(t *testing.T) {
 	if !m.previewOpen {
 		t.Fatal("esc closed Quick Look instead of stopping typing")
 	}
-	if len(panes.sent) != 3 {
+	if len(panes.sent) != 4 {
 		t.Fatalf("sent %v, want the esc kept from the agent", panes.sent)
 	}
 
@@ -701,8 +716,35 @@ func TestSpaceTogglesTheMirrorAndTypingSitsBehindI(t *testing.T) {
 	if m.previewOpen {
 		t.Fatal("space did not close Quick Look from browse mode")
 	}
-	if len(panes.sent) != 3 {
+	if len(panes.sent) != 4 {
 		t.Fatalf("sent %v, want the closing space kept out of the pane", panes.sent)
+	}
+}
+
+// A title with no space to break at — a CJK title, a path, an identifier —
+// still fills both rows, split at the cell edge instead of a word boundary.
+func TestWrapTitleRowsBreaksUnspacedTitlesAcrossBothRows(t *testing.T) {
+	rows := wrapTitleRows("优化账单页面切换动画和分类排序样式与交互细节", 12)
+	if rows[0] == "" || rows[1] == "" {
+		t.Fatalf("rows = %q, want both rows used", rows)
+	}
+	if lipgloss.Width(rows[0]) > 12 || lipgloss.Width(rows[1]) > 12 {
+		t.Fatalf("rows = %q, want both within the width", rows)
+	}
+	if strings.Contains(rows[0], "…") {
+		t.Fatalf("first row %q truncated instead of carrying into the second", rows[0])
+	}
+
+	// Spaced titles keep breaking at word boundaries.
+	rows = wrapTitleRows("fix the parser regression", 12)
+	if rows[0] != "fix the" || rows[1] != "parser…" && !strings.HasPrefix(rows[1], "parser") {
+		t.Fatalf("rows = %q, want a word-boundary break", rows)
+	}
+
+	// Short titles leave the second row blank.
+	rows = wrapTitleRows("short", 12)
+	if rows[0] != "short" || rows[1] != "" {
+		t.Fatalf("rows = %q, want a one-row title", rows)
 	}
 }
 
@@ -1272,13 +1314,17 @@ func TestKanbanKeepsColumnsReadableAndScrollsTheOverflow(t *testing.T) {
 	m := &Model{group: groupProject, width: 120, height: 40}
 	for i := 0; i < 9; i++ {
 		name := "project-" + string(rune('a'+i))
+		// Distinct ages keep the project columns in a..i order: columns sort
+		// by recency, and identical timestamps would leave the order to the
+		// map's whim.
+		at := now.Add(-time.Duration(i) * time.Minute)
 		m.sessions = append(m.sessions, agent.Session{
 			ID:        name,
 			Agent:     "codex",
 			Title:     "task in " + name,
 			CWD:       "/projects/" + name,
-			RecencyAt: now,
-			UpdatedAt: now,
+			RecencyAt: at,
+			UpdatedAt: at,
 		})
 	}
 	m.clampSelection()

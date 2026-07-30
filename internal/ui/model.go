@@ -1095,7 +1095,9 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if stroke != "ctrl+x" {
 		m.pendingDismissID = ""
 	}
-	if stroke == "ctrl+s" {
+	// While typing into a mirrored pane, the group toggle yields like every
+	// other key: the contract is that only esc and ctrl+] belong to the board.
+	if stroke == "ctrl+s" && !(m.previewOpen && m.paneInput) {
 		m.searching = false
 		m.composing = false
 		m.detail = false
@@ -3470,7 +3472,11 @@ func wrapTitleRows(title string, width int) [2]string {
 		}
 		first = candidate
 	}
-	return [2]string{truncate(title, width), ""}
+	// No word boundary fit inside the width — a CJK title, a path, a long
+	// identifier — so the break lands on the cell edge instead: the first
+	// row is filled whole and the rest carries into the second.
+	head := ansi.Truncate(title, width, "")
+	return [2]string{head, truncate(strings.TrimPrefix(title, head), width)}
 }
 
 // emptyColumnBox is what an empty column holds instead of cards: a dashed
