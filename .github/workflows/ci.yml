@@ -21,6 +21,4 @@ jobs:
           fi
       - name: go vet
         run: go vet ./...
-      # go test 只在本地跑。云端 CI 只留静态检查 + 编译。
-      - name: go build
-        run: go build ./cmd/openagentview
+      # go test / go build 只在本地跑。云端 CI 只留 gofmt + go vet。
