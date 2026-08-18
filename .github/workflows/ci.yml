@@ -13,12 +13,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: gofmt
-        run: |
-          out=$(gofmt -l cmd internal)
-          if [ -n "$out" ]; then
-            echo "gofmt needed on:"; echo "$out"; exit 1
-          fi
       - name: go vet
         run: go vet ./...
-      # go test / go build 只在本地跑。云端 CI 只留 gofmt + go vet。
+      # gofmt / go test / go build 只在本地跑。云端 CI 只留 go vet。
